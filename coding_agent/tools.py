@@ -45,6 +45,10 @@ class ToolRegistry:
                 raise ValueError("Only closed object schemas with string properties are supported")
             self._tools[tool.name] = tool
 
+    def with_tools(self, tools: Iterable[Tool]) -> "ToolRegistry":
+        """Return a combined registry, checking names and schemas as usual."""
+        return ToolRegistry([*self._tools.values(), *tools])
+
     def describe(self) -> str:
         return json.dumps([
             {"name": tool.name, "description": tool.description,

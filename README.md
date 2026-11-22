@@ -38,6 +38,7 @@ registration and argument validation, `tests/test_workspace.py` covers local
 operations and adapters, and `tests/test_edit_file.py` covers exact-match editing.
 `tests/test_agent.py` exercises scripted agent decisions and recovery;
 `tests/test_integration.py` contains the opt-in live Ollama test.
+`tests/test_mcp.py` tests real MCP subprocess communication without Ollama or network access.
 
 Run one component's tests with `python -m pytest -q tests/test_tool_registry.py`.
 
@@ -106,6 +107,55 @@ UTF-8 bytes. Validation failures leave file bytes unchanged; successful edits
 preserve bytes outside the replaced passage. `write_file` remains available for
 whole-file replacement.
 
+## MCP repository search
+
+Enable the bundled read-only MCP server alongside the existing local tools:
+
+```bash
+mini-coding-agent --workspace /tmp/coding-agent-demo --mcp-search --mcp-timeout 10 \
+  "Find the addition bug, fix it, and run tests."
+```
+
+The model sees `mcp_search_repo` with a string `query` argument. It performs
+literal, case-sensitive searches in Python files and returns relative paths,
+1-based line numbers, and matching text. The server skips symlinks, virtual
+environments, Git metadata, and oversized files. Results are limited to 100
+matches, 500 scanned Python files, and 500 characters per matching line; check
+`truncated` before assuming the results are exhaustive.
+
+`MCPClient` launches a subprocess, initializes MCP, discovers tools with
+`tools/list`, and invokes them with `tools/call`. The connection stays open for
+the agent run and closes even if the model fails. Each transport operation has
+a timeout; a transport failure closes the connection and becomes an error
+observation, while a server-reported tool failure leaves the connection usable.
+There is no automatic reconnect. Startup/discovery failures abort setup.
+
+The implementation uses the standard library and a narrow
+[MCP 2025-11-25 stdio protocol](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+subset, not the official SDK. It supports one synchronous request at a time,
+initialization, ping handling, paginated discovery, and tool calls. It does not
+implement HTTP, resources, prompts, sampling, or richer argument schemas.
+Selected tools must expose the registry's closed string-object schemas; other
+schemas fail at setup. This has been tested against the bundled subprocess
+server and controlled protocol fixtures, not third-party servers.
+
+Programmatic use explicitly selects which discovered tools to expose:
+
+```python
+import sys
+from coding_agent.mcp_client import MCPClient
+
+with MCPClient([sys.executable, "-m", "coding_agent.mcp_search_server",
+                "--workspace", str(workspace.root)]) as client:
+    tools = workspace_tools(workspace).with_tools(client.tools({"search_repo"}))
+    result = CodingAgent(model, tools).run("Find and fix the bug")
+```
+
+Only the bundled server is read-only by construction. Tool descriptions and MCP
+annotations do not enforce permissions on arbitrary servers. A configured server
+runs as a normal subprocess with the current user's permissions; workspace path
+checks do not sandbox it. The CLI only launches the bundled search server.
+
 ## Extending tools
 
 `CodingAgent` accepts a `ToolRegistry` instead of a workspace. Existing callers
@@ -137,8 +187,8 @@ and model transport failures propagate to the caller.
 
 Schemas currently support only closed objects with string properties, including
 optional properties; `string_arguments` makes every named property required.
-Richer schemas are rejected at registration. This is an extension point for a
-future MCP adapter, not an MCP implementation. `finish` is reserved for the agent
+Richer schemas are rejected at registration. The MCP adapter currently
+accepts the same restricted schemas. `finish` is reserved for the agent
 lifecycle; results distinguish `finished` from `step_limit`, neither of which
 independently establishes task correctness.
 

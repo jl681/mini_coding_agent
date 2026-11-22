@@ -75,4 +75,52 @@ The registry retrieves an actual `FunctionTool` object, so `tool.execute()` invo
 
 `CodingAgent` handles model interaction, action parsing, observations, tracing, and termination. The `finish` action belongs to the agent lifecycle rather than the registry. Runs also stop at the configured step limit; a finished run does not independently establish task correctness.
 
-The current implementation retains a second dispatcher in `Workspace.execute()`. A later simplification could expose explicit workspace methods and connect handlers directly to them. MCP integration is not implemented yet; a future adapter could provide tools through the same registry after extending schema support as needed.
+The current implementation retains a second dispatcher in `Workspace.execute()`. A later simplification could expose explicit workspace methods and connect handlers directly to them. MCP tools use the same registry through a subprocess client adapter; the current adapter accepts only the registry’s restricted string-object schemas.
+
+
+## MCP Search Integration
+
+```mermaid
+sequenceDiagram
+    participant CLI
+    participant C as MCPClient
+    participant S as Search server subprocess
+    participant A as CodingAgent
+    participant R as ToolRegistry
+    participant T as FunctionTool: mcp_search_repo
+
+    CLI->>C: Enter context and launch server
+    C->>S: initialize
+    S-->>C: Protocol version and capabilities
+    C->>S: notifications/initialized
+    CLI->>C: tools({"search_repo"})
+    C->>S: tools/list
+    S-->>C: Tool name, description, inputSchema
+    C-->>CLI: FunctionTool adapters
+    CLI->>R: Combine local and MCP tools
+    CLI->>A: Run with combined registry
+    A->>R: execute("mcp_search_repo", args)
+    R->>T: execute(args), after validation
+    T->>C: call_tool("search_repo", args)
+    C->>S: tools/call
+    S-->>C: Content and structured search results
+    C-->>T: Observation or structured error
+    T-->>R: Result
+    R-->>A: Result
+    CLI->>C: Exit context, including on failure
+    C->>S: Close stdin and terminate if necessary
+```
+
+The model still chooses the action. The registry dispatches to a function adapter,
+whose handler sends an MCP request instead of calling `Workspace.execute()`.
+The search server has its own repository root and read-only implementation;
+local editing and pytest tools continue to use `Workspace`. The server process
+persists across calls and is closed when the CLI run ends.
+
+This is a small implementation of the
+[MCP stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+and [tool discovery/calls](https://modelcontextprotocol.io/specification/2025-11-25/server/tools),
+not a general-purpose SDK. Tools are explicitly selected and namespaced with
+`mcp_`; unsupported schemas fail during setup. Transport failures invalidate the
+connection, while tool execution errors are returned as observations. See the
+README for limits and supported behavior.
