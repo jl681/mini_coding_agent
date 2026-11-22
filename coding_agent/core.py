@@ -63,6 +63,33 @@ class Workspace:
                 raise ValueError("Invalid content")
             p.write_text(content, encoding="utf-8")
             return {"written": args["path"]}
+        if action == "edit_file":
+            p = self.path(args["path"])
+            if p.suffix != ".py" or not p.is_file():
+                raise ValueError("Only existing Python files may be edited")
+            old_text, new_text = args["old_text"], args["new_text"]
+            if not isinstance(old_text, str) or not old_text:
+                raise ValueError("old_text must be a non-empty string")
+            if not isinstance(new_text, str):
+                raise ValueError("new_text must be a string")
+            if p.stat().st_size > 100_000:
+                raise ValueError("File too large (maximum 100,000 bytes)")
+            # Decode bytes directly so unrelated line endings remain unchanged.
+            content = p.read_bytes().decode("utf-8")
+            if len(content.encode("utf-8")) > 100_000:
+                raise ValueError("File too large (maximum 100,000 bytes)")
+            start = content.find(old_text)
+            if start == -1:
+                raise ValueError("old_text not found; reread the file and use an exact match")
+            # Include overlapping occurrences when checking ambiguity.
+            if content.find(old_text, start + 1) != -1:
+                raise ValueError("old_text matches multiple locations; include more surrounding context")
+            updated = content[:start] + new_text + content[start + len(old_text):]
+            encoded = updated.encode("utf-8")
+            if len(encoded) > 100_000:
+                raise ValueError("Edited file too large (maximum 100,000 bytes)")
+            p.write_bytes(encoded)
+            return {"edited": args["path"], "replacements": 1}
         if action == "run_tests":
             # SECURITY: pytest executes repository code. Use only disposable trusted fixtures
             # or an externally isolated container/VM with no secrets or network access.
@@ -81,6 +108,9 @@ def workspace_tools(workspace: Workspace) -> ToolRegistry:
         ("list_files", "List Python files in the workspace.", ()),
         ("read_file", "Read a workspace file (at most 100,000 bytes).", ("path",)),
         ("write_file", "Replace an existing Python file (at most 100,000 bytes).", ("path", "content")),
+        ("edit_file", "Preferred for localized edits: replace one exact, non-empty, unique passage in an existing Python file. "
+         "Use read_file first; on a mismatch reread it, and on ambiguity include more context. "
+         "Input and resulting files must be at most 100,000 bytes.", ("path", "old_text", "new_text")),
         ("run_tests", "Run pytest in the workspace with a timeout.", ()),
     ]
     return ToolRegistry([

@@ -33,6 +33,14 @@ pytest -q
 RUN_LIVE=1 pytest -q -m live
 ```
 
+Tests are organized by responsibility: `tests/test_tool_registry.py` covers
+registration and argument validation, `tests/test_workspace.py` covers local
+operations and adapters, and `tests/test_edit_file.py` covers exact-match editing.
+`tests/test_agent.py` exercises scripted agent decisions and recovery;
+`tests/test_integration.py` contains the opt-in live Ollama test.
+
+Run one component's tests with `python -m pytest -q tests/test_tool_registry.py`.
+
 ## Independent evaluation
 
 ```bash
@@ -44,10 +52,27 @@ The evaluator creates a fresh repository for each run and adds hidden regression
 ## Design
 
 - Ollama `/api/chat` JSON-format response with one action per step.
-- Four tools: `list_files`, `read_file`, `write_file`, `run_tests`.
+- Five tools: `list_files`, `read_file`, `write_file`, `edit_file`, `run_tests`.
 - `finish` action and maximum-step termination.
 - Full action/observation trace in output.
 - Independent hidden tests and repeat-run success rate.
+
+## Localized edits
+
+Prefer `edit_file` for small changes rather than rewriting a whole file:
+
+```json
+{"action":"edit_file","args":{"path":"calculator.py","old_text":"return a - b","new_text":"return a + b"}}
+```
+
+Read the file first. `old_text` must be non-empty and match exactly once,
+including whitespace; overlapping matches are rejected as ambiguous. Reread the
+file after a mismatch or include more context when a match is ambiguous.
+`new_text` may be empty to delete a passage. Only existing workspace `.py` files
+are editable, and both the original and resulting files are limited to 100,000
+UTF-8 bytes. Validation failures leave file bytes unchanged; successful edits
+preserve bytes outside the replaced passage. `write_file` remains available for
+whole-file replacement.
 
 ## Extending tools
 

@@ -1,9 +1,37 @@
+"""Agent decisions, tool observations, recovery, and termination with scripted models."""
 import json
 
 import pytest
 
 from coding_agent.core import CodingAgent, Workspace, workspace_tools
 from coding_agent.tools import FunctionTool, ToolRegistry, string_arguments
+
+
+class ScriptedModel:
+    def __init__(self, actions):
+        self.actions = iter(actions)
+    def respond(self, messages):
+        return json.dumps(next(self.actions))
+
+
+def test_scripted_agent(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    model = ScriptedModel([
+        {"action": "read_file", "args": {"path": "a.py"}},
+        {"action": "write_file", "args": {"path": "a.py", "content": "x = 2\n"}},
+        {"action": "finish", "args": {"summary": "Fixed"}},
+    ])
+    result = CodingAgent(model, workspace_tools(Workspace(tmp_path))).run("Fix x")
+    assert result["summary"] == "Fixed"
+    assert result["steps"] == 3
+    assert (tmp_path / "a.py").read_text() == "x = 2\n"
+
+
+def test_step_limit(tmp_path):
+    model = ScriptedModel([{"action": "list_files", "args": {}}] * 5)
+    result = CodingAgent(model, workspace_tools(Workspace(tmp_path)), max_steps=2).run("Explore")
+    assert result["steps"] == 2
+    assert "limit" in result["summary"]
 
 
 def test_custom_tool_and_prompt_without_workspace():
@@ -26,51 +54,6 @@ def test_custom_tool_and_prompt_without_workspace():
     result = CodingAgent(Model(), registry).run("Echo hello")
     assert calls == [{"message": "hello"}]
     assert result["termination_reason"] == "finished"
-
-
-@pytest.mark.parametrize("arguments", [{}, {"path": 42}, {"path": "a.py", "extra": "x"}, []])
-def test_invalid_arguments_never_execute(arguments):
-    calls = []
-    registry = ToolRegistry([
-        FunctionTool("read", "Read", string_arguments("path"), lambda args: calls.append(args))
-    ])
-    assert registry.execute("read", arguments)["error"]["code"] == "invalid_arguments"
-    assert calls == []
-
-
-def test_unknown_and_duplicate_tools():
-    tool = FunctionTool("echo", "Echo", string_arguments(), lambda args: {})
-    assert ToolRegistry([]).execute("missing", {})["error"]["code"] == "unknown_tool"
-    with pytest.raises(ValueError, match="duplicate"):
-        ToolRegistry([tool, tool])
-    with pytest.raises(ValueError):
-        ToolRegistry([FunctionTool("finish", "Reserved", string_arguments(), lambda args: {})])
-
-
-def test_reject_unsupported_schema():
-    schema = string_arguments("count")
-    schema["properties"]["count"] = {"type": "integer"}
-    with pytest.raises(ValueError, match="schemas"):
-        ToolRegistry([FunctionTool("count", "Count", schema, lambda args: {})])
-
-
-@pytest.mark.parametrize("path", ["../outside.py", "new.py"])
-def test_registry_preserves_workspace_write_restrictions(tmp_path, path):
-    registry = workspace_tools(Workspace(tmp_path))
-    result = registry.execute("write_file", {"path": path, "content": "pass"})
-    assert result["error"]["code"] == "execution_error"
-    assert not (tmp_path / "new.py").exists()
-
-
-def test_filesystem_errors_become_observations(tmp_path, monkeypatch):
-    workspace = Workspace(tmp_path)
-
-    def fail(action, args):
-        raise PermissionError("Access denied")
-
-    monkeypatch.setattr(workspace, "execute", fail)
-    result = workspace_tools(workspace).execute("list_files", {})
-    assert result == {"error": {"code": "execution_error", "message": "Access denied"}}
 
 
 @pytest.mark.parametrize("bad_response", ["not json", "[]", '{"action": []}',
@@ -124,16 +107,45 @@ def test_step_limit_and_invalid_budget():
         CodingAgent(Model(), ToolRegistry([]), max_steps=0)
 
 
-def test_test_runner_timeout_uses_current_interpreter(tmp_path, monkeypatch):
-    import subprocess
-    import sys
+def test_agent_recovers_from_mismatch_and_verifies_repair(tmp_path):
+    source = '"""Calculator fixture."""\n\ndef add(a, b):\n    return a - b\n\ndef multiply(a, b):\n    return a * b\n'
+    path = tmp_path / "calculator.py"
+    path.write_text(source)
+    (tmp_path / "test_calculator.py").write_text(
+        "from calculator import add, multiply\n"
+        "def test_add(): assert add(2, 3) == 5\n"
+        "def test_multiply(): assert multiply(2, 3) == 6\n")
 
-    def timeout(command, **kwargs):
-        assert command == [sys.executable, "-m", "pytest", "-q"]
-        assert kwargs["cwd"] == tmp_path.resolve()
-        assert kwargs["timeout"] == 7
-        raise subprocess.TimeoutExpired(command, 7)
+    class Model:
+        def __init__(self):
+            self.step = 0
 
-    monkeypatch.setattr("coding_agent.core.subprocess.run", timeout)
-    result = workspace_tools(Workspace(tmp_path, timeout=7)).execute("run_tests", {})
-    assert result == {"exit_code": -1, "output": "Test timeout"}
+        def respond(self, messages):
+            self.step += 1
+            assert '"name": "edit_file"' in messages[0]["content"]
+            previous = messages[-1]["content"]
+            if self.step == 1:
+                decision = {"action": "read_file", "args": {"path": "calculator.py"}}
+            elif self.step == 2:
+                decision = {"action": "edit_file", "args": {
+                    "path": "calculator.py", "old_text": "return a-b", "new_text": "return a + b"}}
+            elif self.step == 3:
+                assert "not found" in previous
+                assert path.read_text() == source
+                decision = {"action": "read_file", "args": {"path": "calculator.py"}}
+            elif self.step == 4:
+                assert "return a - b" in previous
+                decision = {"action": "edit_file", "args": {
+                    "path": "calculator.py", "old_text": "return a - b", "new_text": "return a + b"}}
+            elif self.step == 5:
+                assert '"replacements": 1' in previous
+                decision = {"action": "run_tests", "args": {}}
+            else:
+                assert '"exit_code": 0' in previous
+                decision = {"action": "finish", "args": {"summary": "Fixed and tested"}}
+            return json.dumps(decision)
+
+    result = CodingAgent(Model(), workspace_tools(Workspace(tmp_path))).run("Fix add")
+    assert result["termination_reason"] == "finished"
+    assert result["steps"] == 6
+    assert path.read_text() == source.replace("return a - b", "return a + b")
