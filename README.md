@@ -44,10 +44,42 @@ Run one component's tests with `python -m pytest -q tests/test_tool_registry.py`
 ## Independent evaluation
 
 ```bash
-python -m benchmarks.evaluate --runs 3 --output benchmark-results.json
+# Three runs per task: nine fresh workspaces in total.
+python -m benchmarks.evaluate --model qwen3:4b --runs 3 --output benchmark-results.json
+
+# Select one task and set explicit execution limits.
+python -m benchmarks.evaluate --model qwen3:4b --task order_total --runs 2 --max-steps 16
 ```
 
-The evaluator creates a fresh repository for each run and adds hidden regression tests **after** the agent finishes. The supplied one-task benchmark is only a smoke test, not evidence of general coding capability.
+The suite contains three small repair tasks:
+
+| Task | Behavior being evaluated |
+| --- | --- |
+| `add_bug` | Repair arithmetic addition while preserving negative and fractional inputs. |
+| `order_total` | Inspect `orders.py` and `pricing.py` to fix line pricing used by order aggregation. |
+| `average_empty` | Handle empty sequences when the existing visible tests already pass. |
+
+Each trial uses a fresh workspace and model instance. After the agent stops, the
+evaluator copies its source changes into a separate grading workspace containing
+the original visible tests and hidden regression tests. Changes to visible tests
+are recorded in the diff but do not affect grading. Hidden tests never enter the
+agent workspace. This separation prevents accidental test weakening; it is not a
+security boundary against malicious repository code.
+
+The JSON report includes overall and per-task success rates, per-run traces,
+Python-file diffs, tool call/error counts, invalid action counts, test output,
+termination reasons, and elapsed time including grading. `outcome` distinguishes
+`passed`, `incorrect_repair`, `step_limit`, `model_error`, `execution_error`,
+`evaluation_error`, and `evaluation_timeout`. The independent `passed` field records
+whether grading tests passed, even when the agent exhausted its step budget.
+Model and agent failures count as unsuccessful trials and do not stop later runs.
+`--test-timeout` bounds independent grading, not the total agent run.
+
+Repeat `--task` to select multiple tasks. `--runs` means repetitions **per task**.
+These fixtures provide a development baseline, not evidence of general coding
+capability. Deterministic harness tests in `tests/test_benchmarks.py` use scripted
+models to verify scoring, isolation, repetition, and failure reporting without
+Ollama; their scores do not measure a live model's performance.
 
 ## Design
 
@@ -115,4 +147,4 @@ independently establishes task correctness.
 - `pytest` executes arbitrary code from the repository. A filesystem path check is **not** a sandbox. For untrusted repos, run the entire agent and test runner in an isolated container/VM with restricted network, filesystem, CPU/memory and no secrets.
 - The current implementation only edits existing `.py` files, and blocks paths resolving outside the workspace.
 - It does not enforce subprocess resource limits beyond wall-clock timeout, prevent malicious symlinks from changing between validation and access, or validate the semantic correctness of patches.
-- The benchmark task is intentionally simple; expand to multiple repositories and task types for credible evaluation.
+- The three benchmark tasks are intentionally small; broader repositories and task types are needed for credible capability evaluation.

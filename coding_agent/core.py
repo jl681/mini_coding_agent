@@ -125,11 +125,13 @@ class CodingAgent:
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
         self.model, self.tools, self.max_steps = model, tools, max_steps
+        self.trace: list[dict] = []
 
     def run(self, task: str) -> dict:
         messages = [{"role": "system", "content": SYSTEM % self.tools.describe()},
                     {"role": "user", "content": task}]
-        trace = []
+        self.trace = []
+        trace = self.trace
         started = time.monotonic()
         summary = "Stopped: step limit reached"
         termination_reason = "step_limit"
