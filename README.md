@@ -49,6 +49,42 @@ The evaluator creates a fresh repository for each run and adds hidden regression
 - Full action/observation trace in output.
 - Independent hidden tests and repeat-run success rate.
 
+## Extending tools
+
+`CodingAgent` accepts a `ToolRegistry` instead of a workspace. Existing callers
+should wrap their workspace with `workspace_tools(workspace)`:
+
+```python
+from coding_agent.core import CodingAgent, OllamaModel, Workspace, workspace_tools
+
+agent = CodingAgent(OllamaModel(), workspace_tools(Workspace("/tmp/coding-agent-demo")))
+```
+
+Define a tool through the `Tool` protocol, or wrap a function:
+
+```python
+from coding_agent.tools import FunctionTool, ToolRegistry, string_arguments
+
+tools = ToolRegistry([
+    FunctionTool("echo", "Echo a message.", string_arguments("message"),
+                 lambda args: {"message": args["message"]})
+])
+agent = CodingAgent(OllamaModel(), tools)
+```
+
+Tool definitions generate the model's prompt. The registry validates arguments
+before execution and returns structured errors for unknown tools, invalid
+arguments, and expected execution failures (`ValueError` or `OSError`). Successful
+handlers return JSON-serializable dictionaries. Unexpected implementation errors
+and model transport failures propagate to the caller.
+
+Schemas currently support only closed objects with string properties, including
+optional properties; `string_arguments` makes every named property required.
+Richer schemas are rejected at registration. This is an extension point for a
+future MCP adapter, not an MCP implementation. `finish` is reserved for the agent
+lifecycle; results distinguish `finished` from `step_limit`, neither of which
+independently establishes task correctness.
+
 ## Security limitations
 
 - `pytest` executes arbitrary code from the repository. A filesystem path check is **not** a sandbox. For untrusted repos, run the entire agent and test runner in an isolated container/VM with restricted network, filesystem, CPU/memory and no secrets.

@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import shutil
 import pytest
-from coding_agent.core import CodingAgent, OllamaModel, Workspace
+from coding_agent.core import CodingAgent, OllamaModel, Workspace, workspace_tools
 
 @pytest.mark.live
 def test_live_ollama_repairs_bug(tmp_path):
@@ -11,6 +11,6 @@ def test_live_ollama_repairs_bug(tmp_path):
     source = Path(__file__).parents[1] / "benchmarks" / "tasks" / "add_bug"
     shutil.copytree(source, tmp_path / "repo")
     repo = tmp_path / "repo"
-    result = CodingAgent(OllamaModel(), Workspace(repo)).run("Fix calculator.add and run tests")
+    result = CodingAgent(OllamaModel(), workspace_tools(Workspace(repo))).run("Fix calculator.add and run tests")
     assert result["steps"] > 0
     assert Workspace(repo).execute("run_tests", {})["exit_code"] == 0

@@ -1,6 +1,6 @@
 import json
 import pytest
-from coding_agent.core import CodingAgent, Workspace
+from coding_agent.core import CodingAgent, Workspace, workspace_tools
 
 class ScriptedModel:
     def __init__(self, actions):
@@ -39,14 +39,14 @@ def test_scripted_agent(tmp_path):
         {"action": "write_file", "args": {"path": "a.py", "content": "x = 2\n"}},
         {"action": "finish", "args": {"summary": "Fixed"}},
     ])
-    result = CodingAgent(model, Workspace(tmp_path)).run("Fix x")
+    result = CodingAgent(model, workspace_tools(Workspace(tmp_path))).run("Fix x")
     assert result["summary"] == "Fixed"
     assert result["steps"] == 3
     assert (tmp_path / "a.py").read_text() == "x = 2\n"
 
 def test_step_limit(tmp_path):
     model = ScriptedModel([{"action": "list_files", "args": {}}] * 5)
-    result = CodingAgent(model, Workspace(tmp_path), max_steps=2).run("Explore")
+    result = CodingAgent(model, workspace_tools(Workspace(tmp_path)), max_steps=2).run("Explore")
     assert result["steps"] == 2
     assert "limit" in result["summary"]
 

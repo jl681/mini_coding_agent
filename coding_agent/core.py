@@ -3,17 +3,18 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 from typing import Protocol
 import requests
+from .tools import FunctionTool, ToolRegistry, string_arguments
 
 SYSTEM = """You are a coding agent working in a small Python repository.
-Respond with exactly one JSON object, no Markdown:
-{"action":"list_files","args":{}}
-{"action":"read_file","args":{"path":"relative/path.py"}}
-{"action":"write_file","args":{"path":"relative/path.py","content":"entire replacement content"}}
-{"action":"run_tests","args":{}}
-{"action":"finish","args":{"summary":"what changed"}}
+Respond with exactly one JSON object, no Markdown, using this format:
+{"action":"tool_name","args":{}}
+Available tools (arguments must match input_schema):
+%s
+To finish, respond with {"action":"finish","args":{"summary":"what changed"}}.
 Read code before editing. Make the smallest change that fixes the issue. Run tests after edits.
 Never assume that tests passing proves the task is solved.
 """
@@ -66,7 +67,7 @@ class Workspace:
             # SECURITY: pytest executes repository code. Use only disposable trusted fixtures
             # or an externally isolated container/VM with no secrets or network access.
             try:
-                proc = subprocess.run(["python", "-m", "pytest", "-q"], cwd=self.root,
+                proc = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=self.root,
                     capture_output=True, text=True, timeout=self.timeout,
                     env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
                 return {"exit_code": proc.returncode, "output": (proc.stdout + proc.stderr)[-8000:]}
@@ -74,32 +75,58 @@ class Workspace:
                 return {"exit_code": -1, "output": "Test timeout"}
         raise ValueError(f"Unknown action: {action}")
 
+def workspace_tools(workspace: Workspace) -> ToolRegistry:
+    """Adapt workspace operations without exposing filesystem details to the loop."""
+    definitions = [
+        ("list_files", "List Python files in the workspace.", ()),
+        ("read_file", "Read a workspace file (at most 100,000 bytes).", ("path",)),
+        ("write_file", "Replace an existing Python file (at most 100,000 bytes).", ("path", "content")),
+        ("run_tests", "Run pytest in the workspace with a timeout.", ()),
+    ]
+    return ToolRegistry([
+        FunctionTool(name, description, string_arguments(*parameters),
+                     lambda args, action=name: workspace.execute(action, args))
+        for name, description, parameters in definitions
+    ])
+
+
 class CodingAgent:
-    def __init__(self, model: Model, workspace: Workspace, max_steps: int = 12):
-        self.model, self.workspace, self.max_steps = model, workspace, max_steps
+    def __init__(self, model: Model, tools: ToolRegistry, max_steps: int = 12):
+        if max_steps < 1:
+            raise ValueError("max_steps must be positive")
+        self.model, self.tools, self.max_steps = model, tools, max_steps
 
     def run(self, task: str) -> dict:
-        messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}]
+        messages = [{"role": "system", "content": SYSTEM % self.tools.describe()},
+                    {"role": "user", "content": task}]
         trace = []
         started = time.monotonic()
         summary = "Stopped: step limit reached"
+        termination_reason = "step_limit"
         for step in range(self.max_steps):
+            raw = self.model.respond(messages)
+            args = {}
             try:
-                raw = self.model.respond(messages)
                 decision = json.loads(raw)
+                if not isinstance(decision, dict):
+                    raise ValueError("Decision must be an object")
                 action, args = decision["action"], decision.get("args", {})
-                if not isinstance(args, dict):
-                    raise ValueError("args must be an object")
+                if not isinstance(action, str) or not isinstance(args, dict):
+                    raise ValueError("action must be a string and args must be an object")
                 if action == "finish":
-                    summary = str(args.get("summary", "Finished"))
+                    if set(args) != {"summary"} or not isinstance(args["summary"], str):
+                        raise ValueError("finish requires a string summary")
+                    summary = args["summary"]
+                    termination_reason = "finished"
                     trace.append({"step": step + 1, "action": action, "result": summary})
                     break
-                observation = self.workspace.execute(action, args)
-            except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-                action = "invalid_action"
-                observation = {"error": str(exc)}
-            trace.append({"step": step + 1, "action": action, "args": args if action != "invalid_action" else {},
+                observation = self.tools.execute(action, args)
+            except (ValueError, KeyError, TypeError) as exc:
+                action, args = "invalid_action", {}
+                observation = {"error": {"code": "invalid_action", "message": str(exc)}}
+            trace.append({"step": step + 1, "action": action, "args": args,
                           "result": observation})
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": "Tool observation: " + json.dumps(observation)})
-        return {"summary": summary, "steps": len(trace), "latency_seconds": round(time.monotonic() - started, 3), "trace": trace}
+        return {"summary": summary, "termination_reason": termination_reason,
+                "steps": len(trace), "latency_seconds": round(time.monotonic() - started, 3), "trace": trace}

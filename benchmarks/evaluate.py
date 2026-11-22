@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from coding_agent.core import CodingAgent, OllamaModel, Workspace
+from coding_agent.core import CodingAgent, OllamaModel, Workspace, workspace_tools
 
 BASE = Path(__file__).parent / "tasks"
 
@@ -16,7 +16,7 @@ def evaluate(model="qwen3:8b", runs=3):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
             shutil.copytree(BASE / "add_bug", repo)
-            agent = CodingAgent(OllamaModel(model), Workspace(repo))
+            agent = CodingAgent(OllamaModel(model), workspace_tools(Workspace(repo)))
             result = agent.run("Fix the bug in calculator.add so it returns the sum of its inputs. Run tests.")
             # Never expose hidden tests to the agent.
             shutil.copy2(BASE / "add_bug_hidden" / "test_hidden.py", repo / "test_hidden.py")
