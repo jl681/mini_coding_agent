@@ -44,21 +44,32 @@ Run one component's tests with `python -m pytest -q tests/test_tool_registry.py`
 
 ## Independent evaluation
 
+After installing the project, use the `mini-coding-agent-evaluate` console command
+or the equivalent `python -m benchmarks.evaluate`. Reinstall with
+`pip install -e '.[test]'` after adding or changing console entry points.
+
 ```bash
-# Three runs per task: nine fresh workspaces in total.
+mini-coding-agent-evaluate --model qwen3:8b --task checkout_discovery \
+  --runs 1 --no-think --output /tmp/coding-agent-discovery-no-think.json
+```
+
+```bash
+# Three runs per task: fifteen fresh workspaces in total.
 python -m benchmarks.evaluate --model qwen3:4b --runs 3 --output benchmark-results.json
 
 # Select one task and set explicit execution limits.
 python -m benchmarks.evaluate --model qwen3:4b --task order_total --runs 2 --max-steps 16
 ```
 
-The suite contains three small repair tasks:
+The suite contains five small repair tasks:
 
 | Task | Behavior being evaluated |
 | --- | --- |
 | `add_bug` | Repair arithmetic addition while preserving negative and fractional inputs. |
 | `order_total` | Inspect `orders.py` and `pricing.py` to fix line pricing used by order aggregation. |
 | `average_empty` | Handle empty sequences when the existing visible tests already pass. |
+| `checkout_shipping` | Repair shipping eligibility in the original small checkout fixture. |
+| `checkout_discovery` | Follow nested purchase-flow modules to find a shipping data-flow bug while preserving preview and subscription behavior. |
 
 Each trial uses a fresh workspace and model instance. After the agent stops, the
 evaluator copies its source changes into a separate grading workspace containing
@@ -76,11 +87,92 @@ whether grading tests passed, even when the agent exhausted its step budget.
 Model and agent failures count as unsuccessful trials and do not stop later runs.
 `--test-timeout` bounds independent grading, not the total agent run.
 
+### Compare local tools with MCP search
+
+Run the same task, model, repetition count, and step budget in both modes:
+
+```bash
+python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
+  --runs 3 --max-steps 16 --output /tmp/coding-agent-discovery-baseline.json
+
+python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
+  --runs 3 --max-steps 16 --mcp-search --mcp-timeout 10 \
+  --output /tmp/coding-agent-discovery-mcp.json
+```
+
+The instruction describes free shipping after discounts without naming the
+faulty file or requiring search. The agent can discover the issue using either
+local tools or MCP search. The public entry point delegates through
+`storefront/service.py` to `policies/order_quote.py`; related subscription and
+cart-preview flows also calculate shipping. Visible tests already pass;
+independent regressions check discount-driven threshold crossings, the exact
+boundary, helper behavior, and preservation of the other purchase-related flows.
+The original `checkout_shipping` fixture remains available unchanged.
+
+Tool descriptions now explicitly require relative paths and reading code before
+editing. Rerun both modes with the updated prompt; do not attribute differences
+from older reports solely to MCP. The new task increases discovery work but does
+not guarantee search use or a measurable advantage.
+
+With `--mcp-search`, each trial starts its own server against that trial's
+workspace and closes it before independent grading, including on agent failure.
+Setup failures are recorded as `execution_error` and later trials continue.
+Reports record `mcp_search` at both report and trial level, plus `mcp_timeout` in
+the report. Latency includes server setup and cleanup as well as grading.
+
+Compare success rates and per-run latency, then inspect `tool_calls`,
+`tool_errors`, and `trace` to see whether `mcp_search_repo` was used and what it
+returned. Search use itself is not a scoring requirement, and enabling MCP does
+not force the model to use it. A few runs on one task are exploratory evidence,
+not proof of a general improvement.
+
 Repeat `--task` to select multiple tasks. `--runs` means repetitions **per task**.
 These fixtures provide a development baseline, not evidence of general coding
 capability. Deterministic harness tests in `tests/test_benchmarks.py` use scripted
 models to verify scoring, isolation, repetition, and failure reporting without
 Ollama; their scores do not measure a live model's performance.
+
+## Model thinking mode
+
+Both entry points accept `--think` to enable model thinking and `--no-think` to
+disable it. Omitting both leaves the request field unset, preserving Ollama's
+model default. The setting is sent as top-level `think`, not inside `options`;
+support depends on the selected model. Benchmark reports record `think` as
+`true`, `false`, or `null` (model default).
+
+```bash
+mini-coding-agent --workspace /tmp/coding-agent-demo --model qwen3:8b --no-think \
+  "Find and fix the addition bug. Run tests."
+
+python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
+  --runs 1 --max-steps 16 --no-think --model-timeout 180 \
+  --output /tmp/coding-agent-discovery-no-think.json
+```
+
+Use the same thinking setting in both modes when comparing MCP search. Disabling
+thinking does not disable model action selection; it changes model generation
+behavior. Output-token budgeting is not yet exposed by these CLIs.
+
+## Troubleshooting local model timeouts
+
+Localhost Ollama requests bypass environment proxies. Connection establishment
+has a five-second timeout; `--model-timeout` controls the response read timeout
+(default 180 seconds) for both the agent CLI and evaluator. It does not change
+MCP or grading timeouts, and is not a total trial deadline.
+
+First try one trial with a longer response allowance:
+
+```bash
+python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
+  --runs 1 --max-steps 16 --model-timeout 600 \
+  --output /tmp/coding-agent-discovery-diagnostic.json
+```
+
+A longer timeout allows slow generation but does not establish its cause. If
+this still times out, inspect Ollama's logs and resource usage, check for concurrent
+generation requests, and compare a simple direct chat request. A successful
+`/api/tags` request establishes availability, not successful model generation.
+Use the same timeout in both modes when resuming the MCP comparison.
 
 ## Design
 
@@ -197,4 +289,4 @@ independently establishes task correctness.
 - `pytest` executes arbitrary code from the repository. A filesystem path check is **not** a sandbox. For untrusted repos, run the entire agent and test runner in an isolated container/VM with restricted network, filesystem, CPU/memory and no secrets.
 - The current implementation only edits existing `.py` files, and blocks paths resolving outside the workspace.
 - It does not enforce subprocess resource limits beyond wall-clock timeout, prevent malicious symlinks from changing between validation and access, or validate the semantic correctness of patches.
-- The three benchmark tasks are intentionally small; broader repositories and task types are needed for credible capability evaluation.
+- The five benchmark tasks are intentionally small; broader repositories and task types are needed for credible capability evaluation.

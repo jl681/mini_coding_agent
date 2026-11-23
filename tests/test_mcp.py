@@ -153,7 +153,7 @@ def test_cli_mcp_wiring_and_cleanup(tmp_path, monkeypatch, capsys, fail):
         return client
 
     class Model:
-        def __init__(self, name):
+        def __init__(self, name, timeout=180, think=None):
             pass
 
         def respond(self, messages):

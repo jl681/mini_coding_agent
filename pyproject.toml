@@ -14,9 +14,14 @@ test = ["pytest>=8"]
 
 [project.scripts]
 mini-coding-agent = "coding_agent.cli:main"
+mini-coding-agent-evaluate = "benchmarks.evaluate:main"
 
 [tool.setuptools.packages.find]
-include = ["coding_agent*"]
+include = ["coding_agent*", "benchmarks"]
+namespaces = false
+
+[tool.setuptools.package-data]
+benchmarks = ["tasks/**/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

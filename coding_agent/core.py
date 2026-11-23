@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 from typing import Protocol
+from urllib.parse import urlsplit
+import math
 import requests
 from .tools import FunctionTool, ToolRegistry, string_arguments
 
@@ -15,22 +17,53 @@ Respond with exactly one JSON object, no Markdown, using this format:
 Available tools (arguments must match input_schema):
 %s
 To finish, respond with {"action":"finish","args":{"summary":"what changed"}}.
-Read code before editing. Make the smallest change that fixes the issue. Run tests after edits.
-Never assume that tests passing proves the task is solved.
+Use workspace-relative paths exactly as returned by tools (for example, "module.py" or "src/module.py").
+Never prefix paths with "/", "/workspace", or the workspace directory.
+Investigate before editing: read existing code and trace the relevant entry point, callers, and values passed between functions.
+Do not assume the helper named in the symptom is faulty; check whether its callers supply the correct inputs.
+When search is available, use it to locate relevant definitions and call sites. For literal search, use one exact substring;
+if no matches are returned, try a shorter identifier rather than assuming the code is absent.
+Derive a concrete input and expected result from the user's requirements. Reproduce the reported behavior before editing when possible.
+If the visible tests miss that behavior, add a focused regression to an existing test file when permitted and confirm it fails before the fix.
+Read the target file before editing; do not guess existing file content. Make the smallest change that repairs the active execution path.
+Do not add an unused wrapper as a substitute for changing the behavior actually called. Preserve public interfaces and unrelated behavior.
+Run tests after editing and verify the concrete reported case, including relevant boundaries.
+Passing pre-existing tests alone is insufficient, especially if they passed before the fix.
+Before finishing, distinguish observed test results from assumptions; state any verification you could not perform.
 """
 
 class Model(Protocol):
     def respond(self, messages: list[dict]) -> str: ...
 
 class OllamaModel:
-    def __init__(self, model: str = "qwen3:8b", url: str = "http://127.0.0.1:11434/api/chat"):
-        self.model, self.url = model, url
+    def __init__(self, model: str = "qwen3:8b", url: str = "http://127.0.0.1:11434/api/chat",
+                 timeout: float = 180, think: bool | None = None):
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("model timeout must be finite and positive")
+        self.model, self.url, self.timeout = model, url, timeout
+        if think is not None and not isinstance(think, bool):
+            raise ValueError("think must be a boolean or None")
+        self.think = think
 
     def respond(self, messages: list[dict]) -> str:
-        response = requests.post(self.url, json={"model": self.model, "messages": messages,
-            "stream": False, "format": "json", "options": {"temperature": 0}}, timeout=180)
-        response.raise_for_status()
-        return response.json()["message"]["content"]
+        payload = {"model": self.model, "messages": messages,
+                   "stream": False, "format": "json", "options": {"temperature": 0}}
+        if self.think is not None:
+            payload["think"] = self.think
+        # Local model traffic must not be routed through environment proxies.
+        with requests.Session() as session:
+            if urlsplit(self.url).hostname in {"localhost", "127.0.0.1", "::1"}:
+                session.trust_env = False
+            try:
+                response = session.post(self.url, json=payload,
+                    timeout=(5, self.timeout))
+            except requests.ReadTimeout as exc:
+                raise requests.ReadTimeout(
+                    f"Ollama did not return a response within {self.timeout:g}s; "
+                    "increase --model-timeout or check Ollama load and generation speed"
+                ) from exc
+            response.raise_for_status()
+            return response.json()["message"]["content"]
 
 class Workspace:
     def __init__(self, root: str | Path, timeout: int = 20):
@@ -39,7 +72,7 @@ class Workspace:
 
     def path(self, relative: str) -> Path:
         if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
-            raise ValueError("Expected a relative workspace path")
+            raise ValueError("Expected a relative workspace path, e.g. calculator.py; use paths from list_files or search, without a leading slash")
         target = (self.root / relative).resolve()
         if not target.is_relative_to(self.root) or target == self.root:
             raise ValueError("Path escapes workspace")
@@ -106,10 +139,10 @@ def workspace_tools(workspace: Workspace) -> ToolRegistry:
     """Adapt workspace operations without exposing filesystem details to the loop."""
     definitions = [
         ("list_files", "List Python files in the workspace.", ()),
-        ("read_file", "Read a workspace file (at most 100,000 bytes).", ("path",)),
-        ("write_file", "Replace an existing Python file (at most 100,000 bytes).", ("path", "content")),
+        ("read_file", "Read a workspace-relative path, e.g. calculator.py (no leading slash; at most 100,000 bytes).", ("path",)),
+        ("write_file", "Replace an existing Python file using a workspace-relative path (no leading slash; at most 100,000 bytes).", ("path", "content")),
         ("edit_file", "Preferred for localized edits: replace one exact, non-empty, unique passage in an existing Python file. "
-         "Use read_file first; on a mismatch reread it, and on ambiguity include more context. "
+         "path must be workspace-relative with no leading slash. Use read_file first; on a mismatch reread it, and on ambiguity include more context. "
          "Input and resulting files must be at most 100,000 bytes.", ("path", "old_text", "new_text")),
         ("run_tests", "Run pytest in the workspace with a timeout.", ()),
     ]
