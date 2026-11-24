@@ -51,7 +51,7 @@ PROFILE_DEFAULTS = {
     "provider": "ollama", "model": None, "base_url": None, "api_key_env": None,
     "model_timeout": 180, "think": None, "max_output_tokens": None,
     "json_mode": True, "token_limit_field": None, "max_steps": 12,
-    "mcp_search": False, "mcp_timeout": 10,
+    "mcp_search": False, "mcp_timeout": 10, "native_tools": False,
 }
 
 
@@ -79,7 +79,7 @@ def load_profile(name, path="profiles.json"):
         raise ValueError("Invalid profile provider")
     if effective["token_limit_field"] not in {None, "max_tokens", "max_completion_tokens"}:
         raise ValueError("Invalid profile token_limit_field")
-    for key in ("json_mode", "mcp_search"):
+    for key in ("json_mode", "mcp_search", "native_tools"):
         if type(effective[key]) is not bool:
             raise ValueError(f"Profile field must be boolean: {key}")
     if effective["think"] is not None and type(effective["think"]) is not bool:

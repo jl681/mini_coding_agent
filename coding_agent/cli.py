@@ -16,10 +16,14 @@ def main():
     parser.add_argument("--mcp-search", action=argparse.BooleanOptionalAction, default=False, help="Enable the bundled read-only MCP search server")
     parser.add_argument("--mcp-timeout", type=float, default=10)
     parser.add_argument("--log-file", help="Append flushed run events to a JSON Lines file")
+    parser.add_argument("--log-rejected-responses", action="store_true",
+                        help="Include bounded rejected response previews in --log-file")
     configure_cli_env(parser)
     add_model_arguments(parser)
     configure_cli_profiles(parser)
     args = parser.parse_args()
+    if args.log_rejected_responses and not args.log_file:
+        parser.error("--log-rejected-responses requires --log-file")
     try:
         model = create_model(args.model, **model_options(args))
     except ValueError as exc:
@@ -35,7 +39,8 @@ def main():
             tools = tools.with_tools(client.tools({"search_repo"}))
         result = CodingAgent(model, tools, args.max_steps,
                              recorder=recorder, event_context={"mcp_search": args.mcp_search, "profile": args.profile,
-                                            "profile_hash": args.profile_hash}).run(args.task)
+                                            "profile_hash": args.profile_hash},
+                             log_rejected_responses=args.log_rejected_responses).run(args.task)
     print(json.dumps(result, indent=2))
 
 if __name__ == "__main__":

@@ -138,7 +138,7 @@ MCP and local tool routing do not depend on the model provider.
 with optional environment-based authentication. It normalizes completion reasons
 so the existing truncation guard works for either provider. Unsupported thinking
 flags fail at setup; the adapter does not invent mappings between unrelated
-reasoning settings. Provider responses remain non-streaming JSON action text.
+reasoning settings. Provider responses remain non-streaming; text mode carries JSON actions and native mode carries function-call envelopes.
 
 `ModelResponse` remains re-exported from `core.py` for existing callers. Changing
 provider configuration does not require changes to the agent's tool registry or
@@ -160,3 +160,24 @@ benchmark summaries. The profile hash is computed before CLI overrides; the
 actual model and execution options remain recorded separately. The agent loop
 continues to receive constructed model, tools, and recorder objects rather than
 reading profile files itself.
+
+
+## Native Model Actions
+
+`AgentAction` in `coding_agent/actions.py` holds a provider-neutral function name,
+argument object, and optional call ID. Text-mode models use strict JSON decoding;
+native compatible models receive tool schemas through `respond(messages, tools)`
+and populate `ModelResponse.action` directly from the provider's function-call
+envelope. `finish` is a model-facing function but remains an agent lifecycle
+action outside `ToolRegistry`.
+
+The registry still validates local and MCP tool arguments. Native observations
+use `role: tool` and the original call ID, rather than a user-message text wrapper.
+Provider assistant state, including reasoning content needed for multi-turn
+calls, stays in memory and is excluded from diagnostics. Multi-call responses
+are rejected as a whole, with an error result for each ID; invalid envelopes
+without usable IDs are model errors. Truncated calls never execute.
+
+The DeepSeek profile selects native calling. Other compatible endpoints opt in
+with `--native-tools`; Ollama retains text mode. Native mode does not use text
+JSON formatting or silently fall back to parsing answer content.

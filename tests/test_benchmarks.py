@@ -242,7 +242,7 @@ def test_benchmark_cli_forwards_mcp_options(tmp_path, monkeypatch, capsys):
     assert captured == {"mcp_search": True, "mcp_timeout": 2.5, "model_timeout": 180, "think": None, "log_file": None,
                         "provider": "ollama", "base_url": None, "api_key_env": None,
                         "max_output_tokens": None, "json_mode": True, "token_limit_field": None,
-                        "profile": None, "profile_hash": None}
+                        "profile": None, "profile_hash": None, "log_rejected_responses": False, "native_tools": False}
     assert json.loads(output.read_text())["mcp_search"] is True
     assert json.loads(capsys.readouterr().out)["mcp_search"] is True
 

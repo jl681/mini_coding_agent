@@ -132,6 +132,59 @@ capability. Deterministic harness tests in `tests/test_benchmarks.py` use script
 models to verify scoring, isolation, repetition, and failure reporting without
 Ollama; their scores do not measure a live model's performance.
 
+## Native function calls
+
+The `deepseek` profile now enables `native_tools: true` and disables text JSON
+mode. The adapter sends registered local and MCP tools through the provider's
+`tools` API, together with a `finish` function. It extracts a function name,
+JSON arguments, and call ID into a common `AgentAction` instead of parsing action
+instructions from ordinary answer text.
+
+```bash
+mini-coding-agent-evaluate --profile deepseek --task checkout_discovery --runs 1 \
+  --log-file /tmp/deepseek-native-events.jsonl \
+  --output /tmp/deepseek-native-report.json
+```
+
+`--native-tools` enables this mode for any compatible endpoint that supports
+Chat Completions function calls; `--no-native-tools` restores the JSON-action
+fallback. Ollama retains its JSON-action path and rejects `--native-tools` for
+now. Text JSON mode is suppressed when native calling is enabled.
+
+After each call, the agent returns an assistant message containing the provider's
+call and a `role: tool` result with the matching `tool_call_id`. When required,
+provider `reasoning_content` is preserved only in conversation memory; it is not
+copied into logs or report traces. Ordinary model text is never executed as an
+action in native mode. Completion requires a valid `finish` function call.
+
+The adapter uses `tool_choice: auto`: DeepSeek thinking mode does not support
+forced `required` choices. The prompt requests one call per step, and the agent
+enforces this locally. Multiple calls execute nothing and receive an error
+result for every call ID, allowing the conversation to recover without leaving
+unanswered calls. Malformed arguments also return a correlated error. Missing
+or duplicate call IDs make the response unusable and raise a model error.
+Unknown tools and invalid argument schemas still pass through normal registry
+validation. Truncated responses never execute a tool.
+
+This uses native function calling, not the provider's optional strict-schema
+Beta feature. Function arguments remain untrusted JSON and are validated before
+execution. Native calling improves protocol structure, not repair correctness,
+and may still require retries. See the
+[DeepSeek Tool Calls guide](https://api-docs.deepseek.com/guides/tool_calls/) and
+[Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion/).
+Tests cover mocked provider round trips and a real bundled MCP subprocess; a
+live DeepSeek run is still needed to verify the change on your account.
+
+## Action-format recovery
+
+The agent accepts one JSON action object per model response and never executes
+a prefix extracted from an ambiguous reply. Trailing text, concatenated objects,
+duplicate keys, non-finite numbers, and unexpected top-level fields are rejected.
+The observation tells the model that no action executed and requests exactly one
+object with `action` and `args`, without Markdown or trailing explanations.
+Retries consume the normal step budget. This improves recovery guidance but
+cannot guarantee that a provider will follow the format on a live run.
+
 ## Durable run logs
 
 Use `--log-file` on either CLI to append JSON Lines events as execution happens:
@@ -162,8 +215,14 @@ and `done_reason` when supplied. Event elapsed times are in seconds. A
 that response never executes a tool. The loop may recover within its remaining
 step budget. Returned action traces remain available alongside the new run ID.
 
-Full prompts, tasks, raw model responses, and internal thinking text are omitted.
-A hash of the assembled system prompt identifies prompt changes, and model name,
+Full prompts, tasks, raw model responses, and internal thinking text are omitted
+by default. To diagnose malformed action text, opt in with
+`--log-rejected-responses --log-file /tmp/agent-debug.jsonl` on either CLI.
+Only rejected response content is previewed (first 1,000 characters, plus up to
+320 characters around a JSON parse error). These previews can contain sensitive
+model-generated text; they are saved only in log events, not returned traces.
+Internal thinking fields from the provider response are not collected.
+A hash of the assembled system prompt identifies prompt changes (including function schemas in native mode), and model name,
 thinking mode, response timeout, and step budget are recorded at run start.
 Tool arguments and observations are logged with bounded strings and collection
 depth/size, so logs may still contain source code or other sensitive tool data.
@@ -179,7 +238,9 @@ without its matching completion.
 For custom model implementations, `respond(messages)` now returns
 `ModelResponse(content, metadata={})` from `coding_agent.models` (also re-exported by `coding_agent.core`), rather than a plain
 string. Metadata is optional; scripted models can return
-`ModelResponse(json.dumps(action))`.
+`ModelResponse(json.dumps(action))`. Native adapters can additionally return an
+`AgentAction` plus provider conversation state; their `respond()` method accepts
+the available definitions through an optional `tools` argument.
 
 ## Named configuration profiles
 
@@ -241,7 +302,7 @@ Pass `--profiles-file /path/to/profiles.json` for another file. The default is
 supplied. Missing profiles, unknown fields (including literal API-key fields),
 and invalid types fail at setup. Supported settings are `provider`, `model`,
 `base_url`, `api_key_env`, `model_timeout`, `think`, `max_output_tokens`,
-`json_mode`, `token_limit_field`, `max_steps`, `mcp_search`, and `mcp_timeout`.
+`json_mode`, `token_limit_field`, `native_tools`, `max_steps`, `mcp_search`, and `mcp_timeout`.
 Provider and model are required. Store the environment variable's name in
 `api_key_env`, never its value. Provider-specific option combinations are checked
 by the model factory. Workspace, task, report destinations, and log destinations
@@ -335,8 +396,8 @@ servers. Keys are not included in benchmark configuration or event metadata.
 
 The compatible adapter requests JSON-object output by default; use
 `--no-json-mode` if the endpoint does not support it. The agent still requires
-JSON action text. Native API tool calls, multimodal messages, streaming,
-Responses API, and native Anthropic/Gemini formats are not implemented. Endpoint
+JSON action text. Native API tool calls are available with `--native-tools`. Multimodal messages,
+streaming, Responses API, and native Anthropic/Gemini formats are not implemented. Endpoint
 and model features vary: this is Chat Completions compatibility, not a promise
 that every provider/model accepts identical options. Unsupported `--think` or
 `--no-think` flags fail explicitly for this adapter instead of being ignored.
@@ -352,7 +413,7 @@ models support that setting.
 Compatible responses normalize `finish_reason` into the `done_reason` metadata
 used by the agent; usage counts retain their provider field names. A length limit
 never executes a partial action. Refusals, filtered responses, malformed responses,
-and native tool-call responses are reported as model errors. See the
+and native tool-call responses in text mode are reported as model errors. See the
 [Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 for the underlying response format and token controls.
 

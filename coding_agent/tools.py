@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
 import json
+import copy
 
 
 class Tool(Protocol):
@@ -49,12 +50,14 @@ class ToolRegistry:
         """Return a combined registry, checking names and schemas as usual."""
         return ToolRegistry([*self._tools.values(), *tools])
 
-    def describe(self) -> str:
-        return json.dumps([
-            {"name": tool.name, "description": tool.description,
-             "input_schema": tool.input_schema}
+    def specifications(self) -> list[dict]:
+        return copy.deepcopy([
+            {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
             for tool in self._tools.values()
         ])
+
+    def describe(self) -> str:
+        return json.dumps(self.specifications())
 
     def execute(self, name: str, arguments: dict) -> dict:
         if not isinstance(name, str) or name not in self._tools:

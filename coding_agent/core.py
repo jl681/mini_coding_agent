@@ -10,10 +10,12 @@ import uuid
 from .events import EventRecorder, NullRecorder
 # Keep the original imports available to callers while implementations live separately.
 from .models import Model, ModelResponse, OllamaModel
+from .actions import AgentAction, strict_json_loads
 from .tools import FunctionTool, ToolRegistry, string_arguments
 
 SYSTEM = """You are a coding agent working in a small Python repository.
 Respond with exactly one JSON object, no Markdown, using this format:
+Never concatenate multiple action objects or append explanations after the object. Choose one action and wait for its observation.
 {"action":"tool_name","args":{}}
 Available tools (arguments must match input_schema):
 %s
@@ -32,6 +34,13 @@ Run tests after editing and verify the concrete reported case, including relevan
 Passing pre-existing tests alone is insufficient, especially if they passed before the fix.
 Before finishing, distinguish observed test results from assumptions; state any verification you could not perform.
 """
+
+NATIVE_SYSTEM = (
+    "You are a coding agent working in a small Python repository. "
+    "Use exactly one supplied function per response, then wait for its result. "
+    "Do not encode actions in ordinary answer text. Use finish to end the run with a summary.\n"
+    + SYSTEM[SYSTEM.index("Use workspace-relative paths"):]
+)
 
 class Workspace:
     def __init__(self, root: str | Path, timeout: int = 20):
@@ -123,7 +132,8 @@ def workspace_tools(workspace: Workspace) -> ToolRegistry:
 
 class CodingAgent:
     def __init__(self, model: Model, tools: ToolRegistry, max_steps: int = 12,
-                 recorder: EventRecorder | None = None, event_context: dict | None = None):
+                 recorder: EventRecorder | None = None, event_context: dict | None = None,
+                 log_rejected_responses: bool = False):
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
         self.model, self.tools, self.max_steps = model, tools, max_steps
@@ -131,13 +141,17 @@ class CodingAgent:
         self.run_id: str | None = None
         self.recorder = recorder if recorder is not None else NullRecorder()
         self.event_context = dict(event_context or {})
+        self.log_rejected_responses = log_rejected_responses
 
     def run(self, task: str) -> dict:
         self.trace = []
         run_id = uuid.uuid4().hex
         self.run_id = run_id
         started = time.monotonic()
-        prompt = SYSTEM % self.tools.describe()
+        native = getattr(self.model, "native_tools", False)
+        definitions = self.tools.specifications() + [{"name": "finish", "description": "End the run with a summary of changes and verification.",
+                                                    "input_schema": string_arguments("summary")}]
+        prompt = NATIVE_SYSTEM if native else SYSTEM % self.tools.describe()
 
         def emit(event, **fields):
             self.recorder.emit({**self.event_context, "run_id": run_id, "event": event, **fields})
@@ -147,9 +161,9 @@ class CodingAgent:
              json_mode=getattr(self.model, "json_mode", None),
              token_limit_field=getattr(self.model, "token_limit_field", None), model=getattr(self.model, "model", type(self.model).__name__),
              think=getattr(self.model, "think", None), model_timeout=getattr(self.model, "timeout", None),
-             max_steps=self.max_steps, prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest())
+             max_steps=self.max_steps, native_tools=native, log_rejected_responses=self.log_rejected_responses, prompt_sha256=hashlib.sha256((prompt + (json.dumps(definitions, sort_keys=True) if native else "")).encode()).hexdigest())
         try:
-            result = self._run(task, prompt, emit)
+            result = self._run(task, prompt, emit, definitions if native else None)
         except BaseException as exc:
             emit("run_terminated", termination_reason="interrupted" if isinstance(exc, KeyboardInterrupt) else "error",
                  error_type=type(exc).__name__, error=str(exc), steps=len(self.trace),
@@ -159,7 +173,7 @@ class CodingAgent:
              elapsed_seconds=round(time.monotonic() - started, 6))
         return {**result, "run_id": run_id}
 
-    def _run(self, task: str, prompt: str, emit) -> dict:
+    def _run(self, task: str, prompt: str, emit, definitions=None) -> dict:
         messages = [{"role": "system", "content": prompt}, {"role": "user", "content": task}]
         trace = self.trace
         started = time.monotonic()
@@ -169,7 +183,7 @@ class CodingAgent:
             emit("model_request_started", step=step)
             request_started = time.monotonic()
             try:
-                response = self.model.respond(messages)
+                response = self.model.respond(messages, tools=definitions) if definitions is not None else self.model.respond(messages)
             except BaseException as exc:
                 emit("model_request_failed", step=step, error_type=type(exc).__name__, error=str(exc),
                      elapsed_seconds=round(time.monotonic() - request_started, 6))
@@ -182,10 +196,20 @@ class CodingAgent:
                 if response.metadata.get("done_reason") == "length":
                     emit("model_output_truncated", step=step)
                     raise ValueError("Model output reached its token limit; no action was executed")
-                decision = json.loads(raw)
-                if not isinstance(decision, dict):
-                    raise ValueError("Decision must be an object")
-                action, args = decision["action"], decision.get("args", {})
+                if definitions is not None:
+                    if response.action_error:
+                        raise ValueError(response.action_error)
+                    if response.action is None:
+                        raise ValueError("A native function call is required")
+                    requested = response.action
+                else:
+                    decision = strict_json_loads(raw)
+                    if not isinstance(decision, dict):
+                        raise ValueError("Decision must be an object")
+                    if set(decision) - {"action", "args"}:
+                        raise ValueError("Only action and args are allowed in the response object")
+                    requested = AgentAction(decision["action"], decision.get("args", {}))
+                action, args = requested.name, requested.arguments
                 if not isinstance(action, str) or not isinstance(args, dict):
                     raise ValueError("action must be a string and args must be an object")
                 if action == "finish":
@@ -197,8 +221,24 @@ class CodingAgent:
                     break
             except (ValueError, KeyError, TypeError) as exc:
                 action, args = "invalid_action", {}
-                observation = {"error": {"code": "invalid_action", "message": str(exc)}}
-                emit("action_rejected", step=step, result=observation)
+                recovery = (
+                    "No action from this response was executed. Return exactly ONE JSON object with "
+                    "action and args. Do not return multiple objects, Markdown, or any text before or "
+                    "after the object. Select only the next action and wait for its observation; "
+                    "do not repeat actions already completed successfully."
+                )
+                if definitions is not None:
+                    recovery = ("No function from this response was executed. Call exactly one provided function "
+                                "with valid JSON object arguments. Use finish with a summary when done. "
+                                "Do not repeat actions already completed successfully.")
+                observation = {"error": {"code": "invalid_action", "message": str(exc), "recovery": recovery}}
+                details = {}
+                if self.log_rejected_responses:
+                    details = {"response_preview": raw[:1000], "preview_truncated": len(raw) > 1000}
+                    if isinstance(exc, json.JSONDecodeError):
+                        details.update(error_offset=exc.pos,
+                                       error_context=raw[max(0, exc.pos - 80):exc.pos + 240])
+                emit("action_rejected", step=step, result=observation, **details)
             else:
                 emit("tool_started", step=step, tool=action, arguments=args)
                 tool_started = time.monotonic()
@@ -211,7 +251,16 @@ class CodingAgent:
                 emit("tool_completed", step=step, tool=action, result=observation,
                      is_error="error" in observation, elapsed_seconds=round(time.monotonic() - tool_started, 6))
             trace.append({"step": step, "action": action, "args": args, "result": observation})
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": "Tool observation: " + json.dumps(observation)})
+            if definitions is not None:
+                messages.append(response.assistant_message or {"role": "assistant", "content": ""})
+                if response.tool_call_ids:
+                    for call_id in response.tool_call_ids:
+                        messages.append({"role": "tool", "tool_call_id": call_id,
+                                         "content": json.dumps(observation)})
+                else:
+                    messages.append({"role": "user", "content": json.dumps(observation)})
+            else:
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": "Tool observation: " + json.dumps(observation)})
         return {"summary": summary, "termination_reason": termination_reason,
                 "steps": len(trace), "latency_seconds": round(time.monotonic() - started, 3), "trace": trace}

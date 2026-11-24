@@ -17,7 +17,9 @@
       "token_limit_field": "max_tokens",
       "max_output_tokens": 4096,
       "max_steps": 16,
-      "mcp_search": false
+      "mcp_search": false,
+      "native_tools": true,
+      "json_mode": false
     }
   }
 }

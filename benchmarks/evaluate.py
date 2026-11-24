@@ -66,7 +66,8 @@ def changes(before: dict[str, bytes], after: dict[str, bytes]) -> str:
 
 
 def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: float,
-             mcp_search: bool = False, mcp_timeout: float = 10, recorder=None, profile=None, profile_hash=None) -> dict:
+             mcp_search: bool = False, mcp_timeout: float = 10, recorder=None, profile=None, profile_hash=None,
+             log_rejected_responses=False) -> dict:
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
@@ -85,7 +86,8 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
                     tools = tools.with_tools(client.tools({"search_repo"}))
                 agent = CodingAgent(model, tools, max_steps=max_steps, recorder=recorder,
                                     event_context={"task": task.name, "trial": run, "mcp_search": mcp_search,
-                                                   "profile": profile, "profile_hash": profile_hash})
+                                                   "profile": profile, "profile_hash": profile_hash},
+                                    log_rejected_responses=log_rejected_responses)
                 result = agent.run(task.instruction)
         except requests.RequestException as exc:
             result["termination_reason"] = "model_error"
@@ -141,7 +143,7 @@ def evaluate(model=None, runs=3, tasks=None, max_steps=12, test_timeout=30,
              mcp_search: bool = False, mcp_timeout: float = 10, model_timeout: float = 180, think: bool | None = None,
              log_file: str | None = None, provider="ollama", base_url=None, api_key_env=None,
              max_output_tokens=None, json_mode=True, token_limit_field=None,
-             profile=None, profile_hash=None):
+             profile=None, profile_hash=None, log_rejected_responses=False, native_tools=False):
     """Run each selected task `runs` times, using a fresh model and workspace."""
     if runs < 1 or max_steps < 1 or test_timeout <= 0 or mcp_timeout <= 0:
         raise ValueError("runs, max_steps, test_timeout, and mcp_timeout must be positive")
@@ -150,6 +152,8 @@ def evaluate(model=None, runs=3, tasks=None, max_steps=12, test_timeout=30,
     if think is not None and not isinstance(think, bool):
         raise ValueError("think must be a boolean or None")
     validate_settings(model_timeout, max_output_tokens)
+    if log_rejected_responses and not log_file:
+        raise ValueError("log_rejected_responses requires log_file")
     selected = list(tasks) if tasks is not None else [task.name for task in TASKS]
     available = {task.name: task for task in TASKS}
     if not selected or len(selected) != len(set(selected)) or any(name not in available for name in selected):
@@ -157,18 +161,18 @@ def evaluate(model=None, runs=3, tasks=None, max_steps=12, test_timeout=30,
     model = resolve_model_name(provider, model)
     factory = model_factory or (lambda task, run: create_model(
         model, provider=provider, base_url=base_url, api_key_env=api_key_env, timeout=model_timeout,
-        think=think, max_output_tokens=max_output_tokens, json_mode=json_mode, token_limit_field=token_limit_field))
+        think=think, max_output_tokens=max_output_tokens, json_mode=json_mode, token_limit_field=token_limit_field, native_tools=native_tools))
     with ExitStack() as stack:
         recorder = stack.enter_context(JsonlRecorder(log_file)) if log_file else NullRecorder()
         results = [run_task(available[name], run, factory(available[name], run), max_steps, test_timeout,
-                            mcp_search, mcp_timeout, recorder, profile, profile_hash)
+                            mcp_search, mcp_timeout, recorder, profile, profile_hash, log_rejected_responses)
                    for name in selected for run in range(1, runs + 1)]
     per_task = {}
     for name in selected:
         trials = [result for result in results if result["task"] == name]
         per_task[name] = {"runs": runs, "success_rate": sum(r["passed"] for r in trials) / runs}
-    return {"profile": profile, "profile_hash": profile_hash, "provider": provider, "model": model, "max_output_tokens": max_output_tokens,
-            "json_mode": json_mode, "token_limit_field": token_limit_field, "runs": runs, "max_steps": max_steps, "test_timeout": test_timeout,
+    return {"native_tools": native_tools, "log_rejected_responses": log_rejected_responses, "profile": profile, "profile_hash": profile_hash, "provider": provider, "model": model, "max_output_tokens": max_output_tokens,
+            "json_mode": json_mode and not native_tools, "token_limit_field": token_limit_field, "runs": runs, "max_steps": max_steps, "test_timeout": test_timeout,
             "mcp_search": mcp_search, "mcp_timeout": mcp_timeout, "model_timeout": model_timeout, "think": think,
             "total_runs": len(results), "success_rate": sum(r["passed"] for r in results) / len(results),
             "per_task": per_task, "results": results}
@@ -185,6 +189,8 @@ def main():
     parser.add_argument("--mcp-timeout", type=float, default=10)
     parser.add_argument("--output", default="benchmark-results.json")
     parser.add_argument("--log-file", help="Append events for all trials to a JSON Lines file")
+    parser.add_argument("--log-rejected-responses", action="store_true",
+                        help="Include bounded rejected response previews in --log-file")
     configure_cli_env(parser)
     add_model_arguments(parser)
     configure_cli_profiles(parser)
@@ -195,7 +201,8 @@ def main():
                         model_timeout=args.model_timeout, think=args.think, log_file=args.log_file,
                         provider=args.provider, base_url=args.base_url, api_key_env=args.api_key_env,
                         max_output_tokens=args.max_output_tokens, json_mode=args.json_mode,
-                        token_limit_field=args.token_limit_field, profile=args.profile, profile_hash=args.profile_hash)
+                        token_limit_field=args.token_limit_field, profile=args.profile, profile_hash=args.profile_hash,
+                        log_rejected_responses=args.log_rejected_responses, native_tools=args.native_tools)
     except ValueError as exc:
         parser.error(str(exc))
     Path(args.output).write_text(json.dumps(data, indent=2), encoding="utf-8")
