@@ -154,7 +154,7 @@ def test_cli_mcp_wiring_and_cleanup(tmp_path, monkeypatch, capsys, fail):
         return client
 
     class Model:
-        def __init__(self, name, timeout=180, think=None):
+        def __init__(self, name, timeout=180, think=None, **kwargs):
             pass
 
         def respond(self, messages):
@@ -164,7 +164,7 @@ def test_cli_mcp_wiring_and_cleanup(tmp_path, monkeypatch, capsys, fail):
             return ModelResponse('{"action":"finish","args":{"summary":"Done"}}')
 
     monkeypatch.setattr(cli, "MCPClient", client_factory)
-    monkeypatch.setattr(cli, "OllamaModel", Model)
+    monkeypatch.setattr(cli, "create_model", Model)
     monkeypatch.setattr(sys, "argv", ["mini-coding-agent", "--workspace", str(tmp_path), "--mcp-search", "Inspect"])
     if fail:
         with pytest.raises(RuntimeError, match="Model failed"):

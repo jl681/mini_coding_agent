@@ -128,7 +128,7 @@ def test_registry_error_observation_recorded_without_abort(tmp_path):
 def test_cli_log_file(tmp_path, monkeypatch, capsys):
     from coding_agent import cli
     path = tmp_path / "cli.jsonl"
-    monkeypatch.setattr(cli, "OllamaModel", lambda *args, **kwargs: ScriptedModel([FINISH]))
+    monkeypatch.setattr(cli, "create_model", lambda *args, **kwargs: ScriptedModel([FINISH]))
     monkeypatch.setattr("sys.argv", ["agent", "--workspace", str(tmp_path), "--log-file", str(path), "Go"])
     cli.main()
     result = json.loads(capsys.readouterr().out)
@@ -161,7 +161,7 @@ def test_benchmark_cli_log_option(tmp_path, monkeypatch, capsys):
     from benchmarks import evaluate as module
     path = tmp_path / "events.jsonl"
     output = tmp_path / "report.json"
-    monkeypatch.setattr(module, "OllamaModel", lambda *args, **kwargs: ScriptedModel([FINISH]))
+    monkeypatch.setattr(module, "create_model", lambda *args, **kwargs: ScriptedModel([FINISH]))
     monkeypatch.setattr("sys.argv", ["evaluate", "--task", "add_bug", "--runs", "1",
                                     "--log-file", str(path), "--output", str(output)])
     module.main()

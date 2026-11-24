@@ -1,5 +1,6 @@
 """Repeatable repair evaluation with independent, post-run regression tests."""
 import argparse
+from coding_agent.config import configure_cli_env, configure_cli_profiles
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -17,9 +18,10 @@ import time
 
 import requests
 
+from coding_agent.models import add_model_arguments, create_model, resolve_model_name, validate_settings
 from coding_agent.mcp_client import MCPClient
 from coding_agent.events import JsonlRecorder, NullRecorder
-from coding_agent.core import CodingAgent, Model, OllamaModel, Workspace, workspace_tools
+from coding_agent.core import CodingAgent, Model, Workspace, workspace_tools
 
 BASE = Path(__file__).parent / "tasks"
 
@@ -64,7 +66,7 @@ def changes(before: dict[str, bytes], after: dict[str, bytes]) -> str:
 
 
 def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: float,
-             mcp_search: bool = False, mcp_timeout: float = 10, recorder=None) -> dict:
+             mcp_search: bool = False, mcp_timeout: float = 10, recorder=None, profile=None, profile_hash=None) -> dict:
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
@@ -82,7 +84,8 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
                         timeout=mcp_timeout))
                     tools = tools.with_tools(client.tools({"search_repo"}))
                 agent = CodingAgent(model, tools, max_steps=max_steps, recorder=recorder,
-                                    event_context={"task": task.name, "trial": run, "mcp_search": mcp_search})
+                                    event_context={"task": task.name, "trial": run, "mcp_search": mcp_search,
+                                                   "profile": profile, "profile_hash": profile_hash})
                 result = agent.run(task.instruction)
         except requests.RequestException as exc:
             result["termination_reason"] = "model_error"
@@ -133,10 +136,12 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
         }
 
 
-def evaluate(model="qwen3:8b", runs=3, tasks=None, max_steps=12, test_timeout=30,
+def evaluate(model=None, runs=3, tasks=None, max_steps=12, test_timeout=30,
              model_factory: Callable[[Task, int], Model] | None = None,
              mcp_search: bool = False, mcp_timeout: float = 10, model_timeout: float = 180, think: bool | None = None,
-             log_file: str | None = None):
+             log_file: str | None = None, provider="ollama", base_url=None, api_key_env=None,
+             max_output_tokens=None, json_mode=True, token_limit_field=None,
+             profile=None, profile_hash=None):
     """Run each selected task `runs` times, using a fresh model and workspace."""
     if runs < 1 or max_steps < 1 or test_timeout <= 0 or mcp_timeout <= 0:
         raise ValueError("runs, max_steps, test_timeout, and mcp_timeout must be positive")
@@ -144,21 +149,26 @@ def evaluate(model="qwen3:8b", runs=3, tasks=None, max_steps=12, test_timeout=30
         raise ValueError("model_timeout must be finite and positive")
     if think is not None and not isinstance(think, bool):
         raise ValueError("think must be a boolean or None")
+    validate_settings(model_timeout, max_output_tokens)
     selected = list(tasks) if tasks is not None else [task.name for task in TASKS]
     available = {task.name: task for task in TASKS}
     if not selected or len(selected) != len(set(selected)) or any(name not in available for name in selected):
         raise ValueError("Select one or more distinct known task names")
-    factory = model_factory or (lambda task, run: OllamaModel(model, timeout=model_timeout, think=think))
+    model = resolve_model_name(provider, model)
+    factory = model_factory or (lambda task, run: create_model(
+        model, provider=provider, base_url=base_url, api_key_env=api_key_env, timeout=model_timeout,
+        think=think, max_output_tokens=max_output_tokens, json_mode=json_mode, token_limit_field=token_limit_field))
     with ExitStack() as stack:
         recorder = stack.enter_context(JsonlRecorder(log_file)) if log_file else NullRecorder()
         results = [run_task(available[name], run, factory(available[name], run), max_steps, test_timeout,
-                            mcp_search, mcp_timeout, recorder)
+                            mcp_search, mcp_timeout, recorder, profile, profile_hash)
                    for name in selected for run in range(1, runs + 1)]
     per_task = {}
     for name in selected:
         trials = [result for result in results if result["task"] == name]
         per_task[name] = {"runs": runs, "success_rate": sum(r["passed"] for r in trials) / runs}
-    return {"model": model, "runs": runs, "max_steps": max_steps, "test_timeout": test_timeout,
+    return {"profile": profile, "profile_hash": profile_hash, "provider": provider, "model": model, "max_output_tokens": max_output_tokens,
+            "json_mode": json_mode, "token_limit_field": token_limit_field, "runs": runs, "max_steps": max_steps, "test_timeout": test_timeout,
             "mcp_search": mcp_search, "mcp_timeout": mcp_timeout, "model_timeout": model_timeout, "think": think,
             "total_runs": len(results), "success_rate": sum(r["passed"] for r in results) / len(results),
             "per_task": per_task, "results": results}
@@ -166,24 +176,26 @@ def evaluate(model="qwen3:8b", runs=3, tasks=None, max_steps=12, test_timeout=30
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="qwen3:8b")
     parser.add_argument("--runs", type=int, default=3, help="Runs per task")
     parser.add_argument("--task", action="append", choices=[task.name for task in TASKS],
                         help="Select a task; repeat to select multiple (default: all)")
     parser.add_argument("--max-steps", type=int, default=12)
     parser.add_argument("--test-timeout", type=float, default=30)
-    parser.add_argument("--mcp-search", action="store_true", help="Expose MCP search in each trial")
+    parser.add_argument("--mcp-search", action=argparse.BooleanOptionalAction, default=False, help="Expose MCP search in each trial")
     parser.add_argument("--mcp-timeout", type=float, default=10)
-    parser.add_argument("--model-timeout", type=float, default=180, help="Model response timeout in seconds")
     parser.add_argument("--output", default="benchmark-results.json")
-    parser.add_argument("--think", action=argparse.BooleanOptionalAction, default=None,
-                        help="Enable or disable model thinking (--no-think); omitted uses the model default")
     parser.add_argument("--log-file", help="Append events for all trials to a JSON Lines file")
+    configure_cli_env(parser)
+    add_model_arguments(parser)
+    configure_cli_profiles(parser)
     args = parser.parse_args()
     try:
         data = evaluate(args.model, args.runs, args.task, args.max_steps, args.test_timeout,
                         mcp_search=args.mcp_search, mcp_timeout=args.mcp_timeout,
-                        model_timeout=args.model_timeout, think=args.think, log_file=args.log_file)
+                        model_timeout=args.model_timeout, think=args.think, log_file=args.log_file,
+                        provider=args.provider, base_url=args.base_url, api_key_env=args.api_key_env,
+                        max_output_tokens=args.max_output_tokens, json_mode=args.json_mode,
+                        token_limit_field=args.token_limit_field, profile=args.profile, profile_hash=args.profile_hash)
     except ValueError as exc:
         parser.error(str(exc))
     Path(args.output).write_text(json.dumps(data, indent=2), encoding="utf-8")

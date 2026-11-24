@@ -1,0 +1,23 @@
+{
+  "profiles": {
+    "local-qwen": {
+      "provider": "ollama",
+      "model": "qwen3:8b",
+      "base_url": "http://127.0.0.1:11434",
+      "think": false,
+      "max_output_tokens": 1024,
+      "max_steps": 16,
+      "mcp_search": false
+    },
+    "deepseek": {
+      "provider": "openai-compatible",
+      "model": "deepseek-flash",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "token_limit_field": "max_tokens",
+      "max_output_tokens": 4096,
+      "max_steps": 16,
+      "mcp_search": false
+    }
+  }
+}

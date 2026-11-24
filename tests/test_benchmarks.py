@@ -239,7 +239,10 @@ def test_benchmark_cli_forwards_mcp_options(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["evaluate", "--task", "checkout_shipping", "--mcp-search",
                                       "--mcp-timeout", "2.5", "--output", str(output)])
     module.main()
-    assert captured == {"mcp_search": True, "mcp_timeout": 2.5, "model_timeout": 180, "think": None, "log_file": None}
+    assert captured == {"mcp_search": True, "mcp_timeout": 2.5, "model_timeout": 180, "think": None, "log_file": None,
+                        "provider": "ollama", "base_url": None, "api_key_env": None,
+                        "max_output_tokens": None, "json_mode": True, "token_limit_field": None,
+                        "profile": None, "profile_hash": None}
     assert json.loads(output.read_text())["mcp_search"] is True
     assert json.loads(capsys.readouterr().out)["mcp_search"] is True
 
@@ -287,11 +290,11 @@ def test_model_timeout_forwarded_and_recorded(monkeypatch):
 
     settings = []
 
-    def model_factory(name, timeout, think):
+    def model_factory(name, timeout, think, **kwargs):
         settings.append((name, timeout, think))
         return ScriptedModel([FINISH])
 
-    monkeypatch.setattr(module, "OllamaModel", model_factory)
+    monkeypatch.setattr(module, "create_model", model_factory)
     report = evaluate(model="qwen3:8b", runs=1, tasks=["add_bug"], model_timeout=600)
     assert settings == [("qwen3:8b", 600, None)]
     assert report["model_timeout"] == 600

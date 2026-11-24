@@ -124,3 +124,39 @@ not a general-purpose SDK. Tools are explicitly selected and namespaced with
 `mcp_`; unsupported schemas fail during setup. Transport failures invalidate the
 connection, while tool execution errors are returned as observations. See the
 README for limits and supported behavior.
+
+
+## Model Provider Boundary
+
+`coding_agent.models` defines `Model`, `ModelResponse`, and provider adapters.
+Both entry points construct a model through `create_model()`, then inject it into
+`CodingAgent`. The loop only consumes response content and completion metadata;
+MCP and local tool routing do not depend on the model provider.
+
+`OllamaModel` uses `/api/chat`, with Ollama-specific thinking and token options.
+`OpenAICompatibleModel` uses `/chat/completions` under an explicit API base URL,
+with optional environment-based authentication. It normalizes completion reasons
+so the existing truncation guard works for either provider. Unsupported thinking
+flags fail at setup; the adapter does not invent mappings between unrelated
+reasoning settings. Provider responses remain non-streaming JSON action text.
+
+`ModelResponse` remains re-exported from `core.py` for existing callers. Changing
+provider configuration does not require changes to the agent's tool registry or
+MCP client. Compatibility is limited to the documented HTTP formats and has been
+verified with mocked transport tests rather than live hosted calls.
+
+
+## Configuration Profiles
+
+Both entry points load optional credentials from `.env`, register model arguments,
+then apply a selected profile from `profiles.json` as parser defaults. Explicit
+CLI flags override those defaults. A profile replaces all MODEL_* defaults as a
+unit to avoid mixing providers' settings; credential values remain environment
+lookups performed by the model factory.
+
+`load_profile()` validates nonsecret model and tool settings independently of CLI
+execution. Profile name and settings hash are attached to agent event context and
+benchmark summaries. The profile hash is computed before CLI overrides; the
+actual model and execution options remain recorded separately. The agent loop
+continues to receive constructed model, tools, and recorder objects rather than
+reading profile files itself.

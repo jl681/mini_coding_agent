@@ -5,14 +5,11 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Protocol
-from urllib.parse import urlsplit
-import math
 import hashlib
 import uuid
-from dataclasses import dataclass, field
 from .events import EventRecorder, NullRecorder
-import requests
+# Keep the original imports available to callers while implementations live separately.
+from .models import Model, ModelResponse, OllamaModel
 from .tools import FunctionTool, ToolRegistry, string_arguments
 
 SYSTEM = """You are a coding agent working in a small Python repository.
@@ -35,49 +32,6 @@ Run tests after editing and verify the concrete reported case, including relevan
 Passing pre-existing tests alone is insufficient, especially if they passed before the fix.
 Before finishing, distinguish observed test results from assumptions; state any verification you could not perform.
 """
-
-@dataclass(frozen=True)
-class ModelResponse:
-    content: str
-    metadata: dict = field(default_factory=dict)
-
-
-class Model(Protocol):
-    def respond(self, messages: list[dict]) -> ModelResponse: ...
-
-class OllamaModel:
-    def __init__(self, model: str = "qwen3:8b", url: str = "http://127.0.0.1:11434/api/chat",
-                 timeout: float = 180, think: bool | None = None):
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("model timeout must be finite and positive")
-        self.model, self.url, self.timeout = model, url, timeout
-        if think is not None and not isinstance(think, bool):
-            raise ValueError("think must be a boolean or None")
-        self.think = think
-
-    def respond(self, messages: list[dict]) -> ModelResponse:
-        payload = {"model": self.model, "messages": messages,
-                   "stream": False, "format": "json", "options": {"temperature": 0}}
-        if self.think is not None:
-            payload["think"] = self.think
-        # Local model traffic must not be routed through environment proxies.
-        with requests.Session() as session:
-            if urlsplit(self.url).hostname in {"localhost", "127.0.0.1", "::1"}:
-                session.trust_env = False
-            try:
-                response = session.post(self.url, json=payload,
-                    timeout=(5, self.timeout))
-            except requests.ReadTimeout as exc:
-                raise requests.ReadTimeout(
-                    f"Ollama did not return a response within {self.timeout:g}s; "
-                    "increase --model-timeout or check Ollama load and generation speed"
-                ) from exc
-            response.raise_for_status()
-            data = response.json()
-            metrics = ("done_reason", "total_duration", "load_duration", "prompt_eval_count",
-                       "prompt_eval_duration", "eval_count", "eval_duration")
-            return ModelResponse(data["message"]["content"],
-                                 {key: data[key] for key in metrics if key in data})
 
 class Workspace:
     def __init__(self, root: str | Path, timeout: int = 20):
@@ -188,7 +142,10 @@ class CodingAgent:
         def emit(event, **fields):
             self.recorder.emit({**self.event_context, "run_id": run_id, "event": event, **fields})
 
-        emit("run_started", model=getattr(self.model, "model", type(self.model).__name__),
+        emit("run_started", provider=getattr(self.model, "provider", "custom"),
+             max_output_tokens=getattr(self.model, "max_output_tokens", None),
+             json_mode=getattr(self.model, "json_mode", None),
+             token_limit_field=getattr(self.model, "token_limit_field", None), model=getattr(self.model, "model", type(self.model).__name__),
              think=getattr(self.model, "think", None), model_timeout=getattr(self.model, "timeout", None),
              max_steps=self.max_steps, prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest())
         try:

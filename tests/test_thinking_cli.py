@@ -12,13 +12,13 @@ def test_agent_thinking_flag(tmp_path, monkeypatch, capsys, flags, expected):
     settings = []
 
     class Model:
-        def __init__(self, name, timeout, think):
+        def __init__(self, name, timeout, think, **kwargs):
             settings.append(think)
 
         def respond(self, messages):
             return ModelResponse('{"action":"finish","args":{"summary":"Done"}}')
 
-    monkeypatch.setattr(cli, "OllamaModel", Model)
+    monkeypatch.setattr(cli, "create_model", Model)
     monkeypatch.setattr(sys, "argv", ["agent", "--workspace", str(tmp_path), *flags, "Inspect"])
     cli.main()
     assert settings == [expected]
@@ -31,14 +31,14 @@ def test_benchmark_thinking_flag_and_report(tmp_path, monkeypatch, capsys, flags
     settings = []
 
     class Model:
-        def __init__(self, name, timeout, think):
+        def __init__(self, name, timeout, think, **kwargs):
             settings.append(think)
 
         def respond(self, messages):
             return ModelResponse('{"action":"finish","args":{"summary":"Done"}}')
 
     output = tmp_path / "report.json"
-    monkeypatch.setattr(module, "OllamaModel", Model)
+    monkeypatch.setattr(module, "create_model", Model)
     monkeypatch.setattr(sys, "argv", ["evaluate", "--task", "add_bug", "--runs", "1",
                                       "--output", str(output), *flags])
     module.main()
