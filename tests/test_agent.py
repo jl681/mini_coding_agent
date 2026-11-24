@@ -1,5 +1,6 @@
 """Agent decisions, tool observations, recovery, and termination with scripted models."""
 import json
+from coding_agent.core import ModelResponse
 
 import pytest
 
@@ -11,7 +12,7 @@ class ScriptedModel:
     def __init__(self, actions):
         self.actions = iter(actions)
     def respond(self, messages):
-        return json.dumps(next(self.actions))
+        return ModelResponse(json.dumps(next(self.actions)))
 
 
 def test_scripted_agent(tmp_path):
@@ -47,9 +48,9 @@ def test_custom_tool_and_prompt_without_workspace():
             assert "Echo a message." in prompt
             assert "read_file" not in prompt
             if len(messages) == 2:
-                return json.dumps({"action": "echo", "args": {"message": "hello"}})
+                return ModelResponse(json.dumps({"action": "echo", "args": {"message": "hello"}}))
             assert json.loads(messages[-1]["content"].removeprefix("Tool observation: ")) == {"echo": "hello"}
-            return json.dumps({"action": "finish", "args": {"summary": "Done"}})
+            return ModelResponse(json.dumps({"action": "finish", "args": {"summary": "Done"}}))
 
     result = CodingAgent(Model(), registry).run("Echo hello")
     assert calls == [{"message": "hello"}]
@@ -63,7 +64,7 @@ def test_malformed_decision_recovery(bad_response):
 
     class Model:
         def respond(self, messages):
-            return next(responses)
+            return ModelResponse(next(responses))
 
     result = CodingAgent(Model(), ToolRegistry([])).run("Recover")
     assert result["trace"][0]["result"]["error"]["code"] == "invalid_action"
@@ -87,7 +88,7 @@ def test_invalid_call_recovery_edit_and_test(tmp_path):
         def respond(self, messages):
             if len(messages) == 4:
                 assert "invalid_arguments" in messages[-1]["content"]
-            return json.dumps(next(responses))
+            return ModelResponse(json.dumps(next(responses)))
 
     result = CodingAgent(Model(), workspace_tools(Workspace(tmp_path))).run("Fix add")
     assert result["termination_reason"] == "finished"
@@ -98,7 +99,7 @@ def test_invalid_call_recovery_edit_and_test(tmp_path):
 def test_step_limit_and_invalid_budget():
     class Model:
         def respond(self, messages):
-            return '{"action":"missing","args":{}}'
+            return ModelResponse('{"action":"missing","args":{}}')
 
     result = CodingAgent(Model(), ToolRegistry([]), max_steps=2).run("Try")
     assert result["steps"] == 2
@@ -143,7 +144,7 @@ def test_agent_recovers_from_mismatch_and_verifies_repair(tmp_path):
             else:
                 assert '"exit_code": 0' in previous
                 decision = {"action": "finish", "args": {"summary": "Fixed and tested"}}
-            return json.dumps(decision)
+            return ModelResponse(json.dumps(decision))
 
     result = CodingAgent(Model(), workspace_tools(Workspace(tmp_path))).run("Fix add")
     assert result["termination_reason"] == "finished"

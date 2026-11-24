@@ -18,6 +18,7 @@ import time
 import requests
 
 from coding_agent.mcp_client import MCPClient
+from coding_agent.events import JsonlRecorder, NullRecorder
 from coding_agent.core import CodingAgent, Model, OllamaModel, Workspace, workspace_tools
 
 BASE = Path(__file__).parent / "tasks"
@@ -63,7 +64,7 @@ def changes(before: dict[str, bytes], after: dict[str, bytes]) -> str:
 
 
 def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: float,
-             mcp_search: bool = False, mcp_timeout: float = 10) -> dict:
+             mcp_search: bool = False, mcp_timeout: float = 10, recorder=None) -> dict:
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
@@ -80,7 +81,8 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
                         [sys.executable, "-m", "coding_agent.mcp_search_server", "--workspace", str(repo)],
                         timeout=mcp_timeout))
                     tools = tools.with_tools(client.tools({"search_repo"}))
-                agent = CodingAgent(model, tools, max_steps=max_steps)
+                agent = CodingAgent(model, tools, max_steps=max_steps, recorder=recorder,
+                                    event_context={"task": task.name, "trial": run, "mcp_search": mcp_search})
                 result = agent.run(task.instruction)
         except requests.RequestException as exc:
             result["termination_reason"] = "model_error"
@@ -121,6 +123,7 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
         return {
             "task": task.name, "run": run, "mcp_search": mcp_search, "passed": passed, "outcome": outcome,
             "termination_reason": result["termination_reason"], "summary": result["summary"],
+            "run_id": agent.run_id if agent is not None else None,
             "steps": len(trace), "latency_seconds": round(time.monotonic() - started, 3),
             "tool_calls": dict(Counter(entry["action"] for entry in tool_trace)),
             "tool_errors": sum("error" in entry["result"] for entry in tool_trace),
@@ -132,7 +135,8 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
 
 def evaluate(model="qwen3:8b", runs=3, tasks=None, max_steps=12, test_timeout=30,
              model_factory: Callable[[Task, int], Model] | None = None,
-             mcp_search: bool = False, mcp_timeout: float = 10, model_timeout: float = 180, think: bool | None = None):
+             mcp_search: bool = False, mcp_timeout: float = 10, model_timeout: float = 180, think: bool | None = None,
+             log_file: str | None = None):
     """Run each selected task `runs` times, using a fresh model and workspace."""
     if runs < 1 or max_steps < 1 or test_timeout <= 0 or mcp_timeout <= 0:
         raise ValueError("runs, max_steps, test_timeout, and mcp_timeout must be positive")
@@ -145,9 +149,11 @@ def evaluate(model="qwen3:8b", runs=3, tasks=None, max_steps=12, test_timeout=30
     if not selected or len(selected) != len(set(selected)) or any(name not in available for name in selected):
         raise ValueError("Select one or more distinct known task names")
     factory = model_factory or (lambda task, run: OllamaModel(model, timeout=model_timeout, think=think))
-    results = [run_task(available[name], run, factory(available[name], run), max_steps, test_timeout,
-                        mcp_search, mcp_timeout)
-               for name in selected for run in range(1, runs + 1)]
+    with ExitStack() as stack:
+        recorder = stack.enter_context(JsonlRecorder(log_file)) if log_file else NullRecorder()
+        results = [run_task(available[name], run, factory(available[name], run), max_steps, test_timeout,
+                            mcp_search, mcp_timeout, recorder)
+                   for name in selected for run in range(1, runs + 1)]
     per_task = {}
     for name in selected:
         trials = [result for result in results if result["task"] == name]
@@ -172,11 +178,12 @@ def main():
     parser.add_argument("--output", default="benchmark-results.json")
     parser.add_argument("--think", action=argparse.BooleanOptionalAction, default=None,
                         help="Enable or disable model thinking (--no-think); omitted uses the model default")
+    parser.add_argument("--log-file", help="Append events for all trials to a JSON Lines file")
     args = parser.parse_args()
     try:
         data = evaluate(args.model, args.runs, args.task, args.max_steps, args.test_timeout,
                         mcp_search=args.mcp_search, mcp_timeout=args.mcp_timeout,
-                        model_timeout=args.model_timeout, think=args.think)
+                        model_timeout=args.model_timeout, think=args.think, log_file=args.log_file)
     except ValueError as exc:
         parser.error(str(exc))
     Path(args.output).write_text(json.dumps(data, indent=2), encoding="utf-8")

@@ -1,5 +1,6 @@
 """Real subprocess MCP tests; no Ollama, network, or external SDK required."""
 import json
+from coding_agent.core import ModelResponse
 import sys
 
 import pytest
@@ -48,7 +49,7 @@ def test_agent_can_search_then_edit_through_same_registry(tmp_path):
             assert "mcp_search_repo" in messages[0]["content"]
             if len(messages) == 4:
                 assert '"path": "calculator.py"' in messages[-1]["content"]
-            return json.dumps(next(actions))
+            return ModelResponse(json.dumps(next(actions)))
 
     with search_client(tmp_path) as client:
         tools = workspace_tools(Workspace(tmp_path)).with_tools(client.tools({"search_repo"}))
@@ -160,7 +161,7 @@ def test_cli_mcp_wiring_and_cleanup(tmp_path, monkeypatch, capsys, fail):
             assert "mcp_search_repo" in messages[0]["content"]
             if fail:
                 raise RuntimeError("Model failed")
-            return '{"action":"finish","args":{"summary":"Done"}}'
+            return ModelResponse('{"action":"finish","args":{"summary":"Done"}}')
 
     monkeypatch.setattr(cli, "MCPClient", client_factory)
     monkeypatch.setattr(cli, "OllamaModel", Model)

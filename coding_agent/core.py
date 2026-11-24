@@ -8,6 +8,10 @@ import time
 from typing import Protocol
 from urllib.parse import urlsplit
 import math
+import hashlib
+import uuid
+from dataclasses import dataclass, field
+from .events import EventRecorder, NullRecorder
 import requests
 from .tools import FunctionTool, ToolRegistry, string_arguments
 
@@ -32,8 +36,14 @@ Passing pre-existing tests alone is insufficient, especially if they passed befo
 Before finishing, distinguish observed test results from assumptions; state any verification you could not perform.
 """
 
+@dataclass(frozen=True)
+class ModelResponse:
+    content: str
+    metadata: dict = field(default_factory=dict)
+
+
 class Model(Protocol):
-    def respond(self, messages: list[dict]) -> str: ...
+    def respond(self, messages: list[dict]) -> ModelResponse: ...
 
 class OllamaModel:
     def __init__(self, model: str = "qwen3:8b", url: str = "http://127.0.0.1:11434/api/chat",
@@ -45,7 +55,7 @@ class OllamaModel:
             raise ValueError("think must be a boolean or None")
         self.think = think
 
-    def respond(self, messages: list[dict]) -> str:
+    def respond(self, messages: list[dict]) -> ModelResponse:
         payload = {"model": self.model, "messages": messages,
                    "stream": False, "format": "json", "options": {"temperature": 0}}
         if self.think is not None:
@@ -63,7 +73,11 @@ class OllamaModel:
                     "increase --model-timeout or check Ollama load and generation speed"
                 ) from exc
             response.raise_for_status()
-            return response.json()["message"]["content"]
+            data = response.json()
+            metrics = ("done_reason", "total_duration", "load_duration", "prompt_eval_count",
+                       "prompt_eval_duration", "eval_count", "eval_duration")
+            return ModelResponse(data["message"]["content"],
+                                 {key: data[key] for key in metrics if key in data})
 
 class Workspace:
     def __init__(self, root: str | Path, timeout: int = 20):
@@ -154,24 +168,63 @@ def workspace_tools(workspace: Workspace) -> ToolRegistry:
 
 
 class CodingAgent:
-    def __init__(self, model: Model, tools: ToolRegistry, max_steps: int = 12):
+    def __init__(self, model: Model, tools: ToolRegistry, max_steps: int = 12,
+                 recorder: EventRecorder | None = None, event_context: dict | None = None):
         if max_steps < 1:
             raise ValueError("max_steps must be positive")
         self.model, self.tools, self.max_steps = model, tools, max_steps
         self.trace: list[dict] = []
+        self.run_id: str | None = None
+        self.recorder = recorder if recorder is not None else NullRecorder()
+        self.event_context = dict(event_context or {})
 
     def run(self, task: str) -> dict:
-        messages = [{"role": "system", "content": SYSTEM % self.tools.describe()},
-                    {"role": "user", "content": task}]
         self.trace = []
+        run_id = uuid.uuid4().hex
+        self.run_id = run_id
+        started = time.monotonic()
+        prompt = SYSTEM % self.tools.describe()
+
+        def emit(event, **fields):
+            self.recorder.emit({**self.event_context, "run_id": run_id, "event": event, **fields})
+
+        emit("run_started", model=getattr(self.model, "model", type(self.model).__name__),
+             think=getattr(self.model, "think", None), model_timeout=getattr(self.model, "timeout", None),
+             max_steps=self.max_steps, prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest())
+        try:
+            result = self._run(task, prompt, emit)
+        except BaseException as exc:
+            emit("run_terminated", termination_reason="interrupted" if isinstance(exc, KeyboardInterrupt) else "error",
+                 error_type=type(exc).__name__, error=str(exc), steps=len(self.trace),
+                 elapsed_seconds=round(time.monotonic() - started, 6))
+            raise
+        emit("run_terminated", termination_reason=result["termination_reason"], steps=result["steps"],
+             elapsed_seconds=round(time.monotonic() - started, 6))
+        return {**result, "run_id": run_id}
+
+    def _run(self, task: str, prompt: str, emit) -> dict:
+        messages = [{"role": "system", "content": prompt}, {"role": "user", "content": task}]
         trace = self.trace
         started = time.monotonic()
         summary = "Stopped: step limit reached"
         termination_reason = "step_limit"
-        for step in range(self.max_steps):
-            raw = self.model.respond(messages)
+        for step in range(1, self.max_steps + 1):
+            emit("model_request_started", step=step)
+            request_started = time.monotonic()
+            try:
+                response = self.model.respond(messages)
+            except BaseException as exc:
+                emit("model_request_failed", step=step, error_type=type(exc).__name__, error=str(exc),
+                     elapsed_seconds=round(time.monotonic() - request_started, 6))
+                raise
+            emit("model_request_completed", step=step, metadata=response.metadata,
+                 elapsed_seconds=round(time.monotonic() - request_started, 6))
+            raw = response.content
             args = {}
             try:
+                if response.metadata.get("done_reason") == "length":
+                    emit("model_output_truncated", step=step)
+                    raise ValueError("Model output reached its token limit; no action was executed")
                 decision = json.loads(raw)
                 if not isinstance(decision, dict):
                     raise ValueError("Decision must be an object")
@@ -183,14 +236,24 @@ class CodingAgent:
                         raise ValueError("finish requires a string summary")
                     summary = args["summary"]
                     termination_reason = "finished"
-                    trace.append({"step": step + 1, "action": action, "result": summary})
+                    trace.append({"step": step, "action": action, "result": summary})
                     break
-                observation = self.tools.execute(action, args)
             except (ValueError, KeyError, TypeError) as exc:
                 action, args = "invalid_action", {}
                 observation = {"error": {"code": "invalid_action", "message": str(exc)}}
-            trace.append({"step": step + 1, "action": action, "args": args,
-                          "result": observation})
+                emit("action_rejected", step=step, result=observation)
+            else:
+                emit("tool_started", step=step, tool=action, arguments=args)
+                tool_started = time.monotonic()
+                try:
+                    observation = self.tools.execute(action, args)
+                except BaseException as exc:
+                    emit("tool_failed", step=step, tool=action, error_type=type(exc).__name__, error=str(exc),
+                         elapsed_seconds=round(time.monotonic() - tool_started, 6))
+                    raise
+                emit("tool_completed", step=step, tool=action, result=observation,
+                     is_error="error" in observation, elapsed_seconds=round(time.monotonic() - tool_started, 6))
+            trace.append({"step": step, "action": action, "args": args, "result": observation})
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": "Tool observation: " + json.dumps(observation)})
         return {"summary": summary, "termination_reason": termination_reason,

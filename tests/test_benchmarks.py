@@ -1,5 +1,6 @@
 """Deterministic checks of benchmark scoring, isolation, and failure reporting."""
 import json
+from coding_agent.core import ModelResponse
 import subprocess
 import sys
 
@@ -17,7 +18,7 @@ class ScriptedModel:
         action = next(self.actions)
         if isinstance(action, Exception):
             raise action
-        return json.dumps(action)
+        return ModelResponse(json.dumps(action))
 
 
 FINISH = {"action": "finish", "args": {"summary": "Done"}}
@@ -238,7 +239,7 @@ def test_benchmark_cli_forwards_mcp_options(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["evaluate", "--task", "checkout_shipping", "--mcp-search",
                                       "--mcp-timeout", "2.5", "--output", str(output)])
     module.main()
-    assert captured == {"mcp_search": True, "mcp_timeout": 2.5, "model_timeout": 180, "think": None}
+    assert captured == {"mcp_search": True, "mcp_timeout": 2.5, "model_timeout": 180, "think": None, "log_file": None}
     assert json.loads(output.read_text())["mcp_search"] is True
     assert json.loads(capsys.readouterr().out)["mcp_search"] is True
 
@@ -267,7 +268,7 @@ def test_discovery_task_supports_nested_edits_and_search(enabled):
                 assert "policies/subscription_quote.py" in paths
                 assert "storefront/preview.py" in paths
                 assert not any("hidden" in path for path in paths)
-            return json.dumps(next(self.actions))
+            return ModelResponse(json.dumps(next(self.actions)))
 
     report = evaluate(runs=1, tasks=["checkout_discovery"], mcp_search=enabled,
                       model_factory=lambda task, run: DiscoveryModel())

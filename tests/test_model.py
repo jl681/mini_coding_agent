@@ -34,7 +34,7 @@ def test_model_transport_configuration(monkeypatch, url, bypass):
             return {"message": {"content": "response"}}
 
     monkeypatch.setattr(requests, "Session", Session)
-    assert OllamaModel(url=url, timeout=600).respond([]) == "response"
+    assert OllamaModel(url=url, timeout=600).respond([]).content == "response"
     assert captured["bypass"] is bypass
     assert captured["timeout"] == (5, 600)
     assert captured["closed"]
@@ -94,3 +94,29 @@ def test_thinking_request_setting(monkeypatch, think):
     else:
         assert payloads[0]["think"] is think
     assert "think" not in payloads[0]["options"]
+
+
+def test_ollama_metadata_preserved_without_thinking_text(monkeypatch):
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, *args, **kwargs):
+            return self
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": {"content": "{}", "thinking": "private reasoning"},
+                    "done_reason": "length", "eval_count": 1024, "eval_duration": 123,
+                    "prompt_eval_count": 800, "extra": "ignored"}
+
+    monkeypatch.setattr(requests, "Session", Session)
+    response = OllamaModel().respond([])
+    assert response.content == "{}"
+    assert response.metadata == {"done_reason": "length", "eval_count": 1024,
+                                 "eval_duration": 123, "prompt_eval_count": 800}

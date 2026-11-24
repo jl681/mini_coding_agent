@@ -1,5 +1,6 @@
 """Thinking flags propagate from both entry points to model configuration."""
 import json
+from coding_agent.core import ModelResponse
 import sys
 
 import pytest
@@ -15,7 +16,7 @@ def test_agent_thinking_flag(tmp_path, monkeypatch, capsys, flags, expected):
             settings.append(think)
 
         def respond(self, messages):
-            return '{"action":"finish","args":{"summary":"Done"}}'
+            return ModelResponse('{"action":"finish","args":{"summary":"Done"}}')
 
     monkeypatch.setattr(cli, "OllamaModel", Model)
     monkeypatch.setattr(sys, "argv", ["agent", "--workspace", str(tmp_path), *flags, "Inspect"])
@@ -34,7 +35,7 @@ def test_benchmark_thinking_flag_and_report(tmp_path, monkeypatch, capsys, flags
             settings.append(think)
 
         def respond(self, messages):
-            return '{"action":"finish","args":{"summary":"Done"}}'
+            return ModelResponse('{"action":"finish","args":{"summary":"Done"}}')
 
     output = tmp_path / "report.json"
     monkeypatch.setattr(module, "OllamaModel", Model)
