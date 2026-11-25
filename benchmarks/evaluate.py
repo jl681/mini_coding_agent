@@ -83,7 +83,7 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
                     client = stack.enter_context(MCPClient(
                         [sys.executable, "-m", "coding_agent.mcp_search_server", "--workspace", str(repo)],
                         timeout=mcp_timeout))
-                    tools = tools.with_tools(client.tools({"search_repo"}))
+                    tools = tools.with_tools(client.tools({"search_repo"}, read_only={"search_repo"}))
                 agent = CodingAgent(model, tools, max_steps=max_steps, recorder=recorder,
                                     event_context={"task": task.name, "trial": run, "mcp_search": mcp_search,
                                                    "profile": profile, "profile_hash": profile_hash},
@@ -129,7 +129,7 @@ def run_task(task: Task, run: int, model: Model, max_steps: int, test_timeout: f
             "task": task.name, "run": run, "mcp_search": mcp_search, "passed": passed, "outcome": outcome,
             "termination_reason": result["termination_reason"], "summary": result["summary"],
             "run_id": agent.run_id if agent is not None else None,
-            "steps": len(trace), "latency_seconds": round(time.monotonic() - started, 3),
+            "steps": agent.steps if agent is not None else 0, "latency_seconds": round(time.monotonic() - started, 3),
             "tool_calls": dict(Counter(entry["action"] for entry in tool_trace)),
             "tool_errors": sum("error" in entry["result"] for entry in tool_trace),
             "invalid_actions": sum(entry["action"] == "invalid_action" for entry in trace),

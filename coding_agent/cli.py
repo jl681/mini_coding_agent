@@ -36,7 +36,7 @@ def main():
             client = stack.enter_context(MCPClient(
                 [sys.executable, "-m", "coding_agent.mcp_search_server", "--workspace", str(workspace.root)],
                 timeout=args.mcp_timeout))
-            tools = tools.with_tools(client.tools({"search_repo"}))
+            tools = tools.with_tools(client.tools({"search_repo"}, read_only={"search_repo"}))
         result = CodingAgent(model, tools, args.max_steps,
                              recorder=recorder, event_context={"mcp_search": args.mcp_search, "profile": args.profile,
                                             "profile_hash": args.profile_hash},

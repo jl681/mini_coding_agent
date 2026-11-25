@@ -19,6 +19,7 @@ class ModelResponse:
     action_error: str | None = None
     assistant_message: dict | None = None
     tool_call_ids: tuple[str, ...] = ()
+    actions: tuple[AgentAction, ...] = ()
 
 
 class Model(Protocol):
@@ -125,7 +126,7 @@ class OpenAICompatibleModel:
             if not tools:
                 raise ModelError("Native tool mode requires tool definitions")
             payload["tools"] = [{"type": "function", "function": {
-                "name": spec["name"], "description": spec["description"],
+                "name": spec["name"], "description": ("Read-only; may be batched. " if spec.get("read_only") else "Call individually. ") + spec["description"],
                 "parameters": spec["input_schema"]}} for spec in tools]
             # DeepSeek thinking mode rejects forced/required tool choices.
             # Prompt for one call; enforce cardinality locally regardless.
@@ -189,20 +190,19 @@ class OpenAICompatibleModel:
             ids.append(call["id"])
         assistant["tool_calls"] = calls
         preview = json.dumps(calls)
-        if len(calls) != 1:
-            return ModelResponse(preview, metadata,
-                action_error="Exactly one function call per response is supported; no calls were executed",
-                assistant_message=assistant, tool_call_ids=tuple(ids))
-        function = calls[0]["function"]
+        actions = []
         try:
-            args = strict_json_loads(function["arguments"])
-            if not isinstance(args, dict):
-                raise ValueError("Function arguments must be a JSON object")
+            for call in calls:
+                function = call["function"]
+                args = strict_json_loads(function["arguments"])
+                if not isinstance(args, dict):
+                    raise ValueError("Function arguments must be a JSON object")
+                actions.append(AgentAction(function["name"], args, call["id"]))
         except (ValueError, TypeError) as exc:
             return ModelResponse(preview, metadata, action_error=str(exc),
                                  assistant_message=assistant, tool_call_ids=tuple(ids))
-        return ModelResponse(preview, metadata, AgentAction(function["name"], args, ids[0]),
-                             assistant_message=assistant, tool_call_ids=tuple(ids))
+        return ModelResponse(preview, metadata, actions[0] if len(actions) == 1 else None,
+                             assistant_message=assistant, tool_call_ids=tuple(ids), actions=tuple(actions))
 
 
 def resolve_model_name(provider, model):

@@ -158,10 +158,11 @@ copied into logs or report traces. Ordinary model text is never executed as an
 action in native mode. Completion requires a valid `finish` function call.
 
 The adapter uses `tool_choice: auto`: DeepSeek thinking mode does not support
-forced `required` choices. The prompt requests one call per step, and the agent
-enforces this locally. Multiple calls execute nothing and receive an error
-result for every call ID, allowing the conversation to recover without leaving
-unanswered calls. Malformed arguments also return a correlated error. Missing
+forced `required` choices. The prompt allows up to eight trusted read-only
+calls per step, executed sequentially. Mixed or invalid batches execute nothing
+and receive an error result for every call ID, allowing the conversation to
+recover without leaving unanswered calls. Malformed arguments also return a
+correlated error. Missing
 or duplicate call IDs make the response unusable and raise a model error.
 Unknown tools and invalid argument schemas still pass through normal registry
 validation. Truncated responses never execute a tool.
@@ -174,6 +175,42 @@ and may still require retries. See the
 [Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion/).
 Tests cover mocked provider round trips and a real bundled MCP subprocess; a
 live DeepSeek run is still needed to verify the change on your account.
+
+## Sequential read-only batches
+
+Native responses can contain up to eight calls when every tool is explicitly
+marked read-only by the host. Local `list_files` and `read_file` qualify. The CLI
+and evaluator explicitly trust the bundled `mcp_search_repo` adapter as read-only.
+`write_file`, `edit_file`, `run_tests`, and lifecycle `finish` must each be called
+alone. `run_tests` executes repository code and is not classified as read-only.
+
+Before starting a batch, the agent parses every call and checks the entire batch
+against tool registration, read-only declarations, and argument schemas. An
+unknown tool, invalid argument schema, malformed JSON, non-read-only call, or
+batch larger than eight rejects the whole batch. No requested call executes in
+that case. Individual path checks and filesystem access occur during execution;
+an expected read error returns an error for that call and other reads continue.
+An unexpected tool crash aborts the run, preserving already completed traces.
+
+Accepted calls execute in order without threads or concurrent access. Only after
+all results are available does the agent ask the model again, returning each
+result with its original `tool_call_id`. The model can still choose sequential
+single calls when later reads depend on earlier observations.
+
+`steps` and `--max-steps` count completed model-response turns, including rejected
+responses and `finish`. One turn can therefore contain several tool trace entries
+with the same `step`, distinct `call_id`, and zero-based `batch_index`. Tool-call
+counts remain individual counts; do not interpret trace length as model steps.
+The CLI result includes total `tool_calls`, while benchmark results retain their
+per-tool count mapping. Events include `batch_started`, `batch_completed`, and
+per-call tool events. Rejection events also record requested tool names and IDs
+without requiring raw-response previews.
+
+Custom tools default to non-read-only. Opt in through
+`FunctionTool(..., read_only=True)` only when their implementation warrants it.
+`MCPClient.tools(allowed, read_only={...})` requires an explicit host declaration;
+server `readOnlyHint` annotations alone do not grant batch eligibility. Text-mode
+JSON actions remain single-action responses.
 
 ## Action-format recovery
 

@@ -14,6 +14,7 @@ class Tool(Protocol):
     name: str
     description: str
     input_schema: dict
+    read_only: bool
 
     def execute(self, arguments: dict) -> dict: ...
 
@@ -24,6 +25,7 @@ class FunctionTool:
     description: str
     input_schema: dict
     handler: Callable[[dict], dict]
+    read_only: bool = False
 
     def execute(self, arguments: dict) -> dict:
         return self.handler(arguments)
@@ -52,18 +54,21 @@ class ToolRegistry:
 
     def specifications(self) -> list[dict]:
         return copy.deepcopy([
-            {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+            {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema,
+             "read_only": self.is_read_only(tool.name)}
             for tool in self._tools.values()
         ])
 
     def describe(self) -> str:
         return json.dumps(self.specifications())
 
-    def execute(self, name: str, arguments: dict) -> dict:
+    def is_read_only(self, name: str) -> bool:
+        return name in self._tools and getattr(self._tools[name], "read_only", False) is True
+
+    def validate_call(self, name: str, arguments: dict) -> dict | None:
         if not isinstance(name, str) or name not in self._tools:
             return {"error": {"code": "unknown_tool", "message": f"Unknown tool: {name}"}}
-        tool = self._tools[name]
-        schema = tool.input_schema
+        schema = self._tools[name].input_schema
         if not isinstance(arguments, dict):
             message = "Tool arguments must be an object"
         elif any(key not in arguments for key in schema["required"]):
@@ -75,11 +80,28 @@ class ToolRegistry:
         elif any(not isinstance(value, str) for value in arguments.values()):
             message = "Tool argument values must be strings"
         else:
-            try:
-                return tool.execute(arguments)
-            except (ValueError, OSError) as exc:
-                return {"error": {"code": "execution_error", "message": str(exc)}}
+            return None
         return {"error": {"code": "invalid_arguments", "message": message}}
+
+    def validate_read_batch(self, actions, limit=8):
+        if len(actions) > limit:
+            raise ValueError(f"Read-only batches are limited to {limit} calls; no calls were executed")
+        for action in actions:
+            if not self.is_read_only(action.name):
+                raise ValueError("Batches may contain only explicitly trusted read-only tools; "
+                                 "writes, tests, and finish must be called individually; no calls were executed")
+            error = self.validate_call(action.name, action.arguments)
+            if error:
+                raise ValueError("Invalid batch arguments: " + error["error"]["message"] + "; no calls were executed")
+
+    def execute(self, name: str, arguments: dict) -> dict:
+        error = self.validate_call(name, arguments)
+        if error:
+            return error
+        try:
+            return self._tools[name].execute(arguments)
+        except (ValueError, OSError) as exc:
+            return {"error": {"code": "execution_error", "message": str(exc)}}
 
 
 def string_arguments(*names: str) -> dict:

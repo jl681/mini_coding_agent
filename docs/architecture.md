@@ -175,9 +175,25 @@ The registry still validates local and MCP tool arguments. Native observations
 use `role: tool` and the original call ID, rather than a user-message text wrapper.
 Provider assistant state, including reasoning content needed for multi-turn
 calls, stays in memory and is excluded from diagnostics. Multi-call responses
-are rejected as a whole, with an error result for each ID; invalid envelopes
-without usable IDs are model errors. Truncated calls never execute.
+are accepted only as bounded, validated read-only batches; rejected batches get
+an error result for each ID. Invalid envelopes without usable IDs are model errors. Truncated calls never execute.
 
 The DeepSeek profile selects native calling. Other compatible endpoints opt in
 with `--native-tools`; Ollama retains text mode. Native mode does not use text
 JSON formatting or silently fall back to parsing answer content.
+
+
+## Read-Only Batch Execution
+
+The adapter parses all native calls into `ModelResponse.actions` before any tool
+runs. The registry checks the full batch for trusted read-only declarations and
+valid argument schemas, with a maximum of eight calls. Writes, test execution,
+and `finish` cannot be batched. MCP read-only eligibility comes from explicit
+host configuration rather than server annotations.
+
+The agent executes accepted calls sequentially, records each result and call ID,
+and returns every correlated tool observation before the next model request.
+Expected per-call read failures remain observations; unexpected exceptions abort
+the run. The step budget counts model-response turns, while trace entries and
+benchmark tool counts count individual calls. Batch entries share a step number
+and include a batch index; events expose batch boundaries.

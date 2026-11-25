@@ -37,7 +37,8 @@ Before finishing, distinguish observed test results from assumptions; state any 
 
 NATIVE_SYSTEM = (
     "You are a coding agent working in a small Python repository. "
-    "Use exactly one supplied function per response, then wait for its result. "
+    "You may batch up to 8 explicitly read-only functions per response; they execute sequentially. "
+    "Call any write, test execution, or finish individually. Wait for all results before deciding again. "
     "Do not encode actions in ordinary answer text. Use finish to end the run with a summary.\n"
     + SYSTEM[SYSTEM.index("Use workspace-relative paths"):]
 )
@@ -125,7 +126,8 @@ def workspace_tools(workspace: Workspace) -> ToolRegistry:
     ]
     return ToolRegistry([
         FunctionTool(name, description, string_arguments(*parameters),
-                     lambda args, action=name: workspace.execute(action, args))
+                     lambda args, action=name: workspace.execute(action, args),
+                     read_only=name in {"list_files", "read_file"})
         for name, description, parameters in definitions
     ])
 
@@ -138,6 +140,7 @@ class CodingAgent:
             raise ValueError("max_steps must be positive")
         self.model, self.tools, self.max_steps = model, tools, max_steps
         self.trace: list[dict] = []
+        self.steps = 0
         self.run_id: str | None = None
         self.recorder = recorder if recorder is not None else NullRecorder()
         self.event_context = dict(event_context or {})
@@ -145,6 +148,7 @@ class CodingAgent:
 
     def run(self, task: str) -> dict:
         self.trace = []
+        self.steps = 0
         run_id = uuid.uuid4().hex
         self.run_id = run_id
         started = time.monotonic()
@@ -166,7 +170,7 @@ class CodingAgent:
             result = self._run(task, prompt, emit, definitions if native else None)
         except BaseException as exc:
             emit("run_terminated", termination_reason="interrupted" if isinstance(exc, KeyboardInterrupt) else "error",
-                 error_type=type(exc).__name__, error=str(exc), steps=len(self.trace),
+                 error_type=type(exc).__name__, error=str(exc), steps=self.steps,
                  elapsed_seconds=round(time.monotonic() - started, 6))
             raise
         emit("run_terminated", termination_reason=result["termination_reason"], steps=result["steps"],
@@ -188,10 +192,12 @@ class CodingAgent:
                 emit("model_request_failed", step=step, error_type=type(exc).__name__, error=str(exc),
                      elapsed_seconds=round(time.monotonic() - request_started, 6))
                 raise
+            self.steps = step
             emit("model_request_completed", step=step, metadata=response.metadata,
                  elapsed_seconds=round(time.monotonic() - request_started, 6))
             raw = response.content
             args = {}
+            batch = ()
             try:
                 if response.metadata.get("done_reason") == "length":
                     emit("model_output_truncated", step=step)
@@ -199,9 +205,14 @@ class CodingAgent:
                 if definitions is not None:
                     if response.action_error:
                         raise ValueError(response.action_error)
-                    if response.action is None:
-                        raise ValueError("A native function call is required")
-                    requested = response.action
+                    if len(response.actions) > 1:
+                        batch = response.actions
+                        self.tools.validate_read_batch(batch)
+                        requested = batch[0]
+                    else:
+                        if response.action is None:
+                            raise ValueError("A native function call is required")
+                        requested = response.action
                 else:
                     decision = strict_json_loads(raw)
                     if not isinstance(decision, dict):
@@ -228,8 +239,9 @@ class CodingAgent:
                     "do not repeat actions already completed successfully."
                 )
                 if definitions is not None:
-                    recovery = ("No function from this response was executed. Call exactly one provided function "
-                                "with valid JSON object arguments. Use finish with a summary when done. "
+                    recovery = ("No function from this response was executed. Call one provided function, or at most "
+                                "8 explicitly read-only functions, with valid JSON object arguments. "
+                                "Call writes, tests, and finish individually. Use finish with a summary when done. "
                                 "Do not repeat actions already completed successfully.")
                 observation = {"error": {"code": "invalid_action", "message": str(exc), "recovery": recovery}}
                 details = {}
@@ -238,18 +250,28 @@ class CodingAgent:
                     if isinstance(exc, json.JSONDecodeError):
                         details.update(error_offset=exc.pos,
                                        error_context=raw[max(0, exc.pos - 80):exc.pos + 240])
+                if definitions is not None:
+                    details.update(call_ids=list(response.tool_call_ids),
+                                   requested_tools=[item.name for item in response.actions])
                 emit("action_rejected", step=step, result=observation, **details)
             else:
-                emit("tool_started", step=step, tool=action, arguments=args)
-                tool_started = time.monotonic()
-                try:
-                    observation = self.tools.execute(action, args)
-                except BaseException as exc:
-                    emit("tool_failed", step=step, tool=action, error_type=type(exc).__name__, error=str(exc),
-                         elapsed_seconds=round(time.monotonic() - tool_started, 6))
-                    raise
-                emit("tool_completed", step=step, tool=action, result=observation,
-                     is_error="error" in observation, elapsed_seconds=round(time.monotonic() - tool_started, 6))
+                if batch:
+                    observations = []
+                    emit("batch_started", step=step, call_count=len(batch))
+                    for index, item in enumerate(batch):
+                        result = self._execute_tool(item.name, item.arguments, step, emit,
+                                                    call_id=item.call_id, batch_index=index)
+                        observations.append(result)
+                        trace.append({"step": step, "action": item.name, "args": item.arguments,
+                                      "call_id": item.call_id, "batch_index": index, "result": result})
+                    emit("batch_completed", step=step, call_count=len(batch))
+                    messages.append(response.assistant_message)
+                    for item, result in zip(batch, observations):
+                        messages.append({"role": "tool", "tool_call_id": item.call_id,
+                                         "content": json.dumps(result)})
+                    continue
+                observation = self._execute_tool(action, args, step, emit,
+                                                 **({"call_id": requested.call_id} if definitions is not None else {}))
             trace.append({"step": step, "action": action, "args": args, "result": observation})
             if definitions is not None:
                 messages.append(response.assistant_message or {"role": "assistant", "content": ""})
@@ -263,4 +285,19 @@ class CodingAgent:
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({"role": "user", "content": "Tool observation: " + json.dumps(observation)})
         return {"summary": summary, "termination_reason": termination_reason,
-                "steps": len(trace), "latency_seconds": round(time.monotonic() - started, 3), "trace": trace}
+                "steps": self.steps, "tool_calls": sum(t["action"] not in {"finish", "invalid_action"} for t in trace),
+                "latency_seconds": round(time.monotonic() - started, 3), "trace": trace}
+
+
+    def _execute_tool(self, action, args, step, emit, **context):
+        emit("tool_started", step=step, tool=action, arguments=args, **context)
+        started = time.monotonic()
+        try:
+            observation = self.tools.execute(action, args)
+        except BaseException as exc:
+            emit("tool_failed", step=step, tool=action, error_type=type(exc).__name__, error=str(exc),
+                 elapsed_seconds=round(time.monotonic() - started, 6), **context)
+            raise
+        emit("tool_completed", step=step, tool=action, result=observation,
+             is_error="error" in observation, elapsed_seconds=round(time.monotonic() - started, 6), **context)
+        return observation

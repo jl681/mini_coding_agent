@@ -18,6 +18,6 @@ The response contains additional content after the first JSON value—possibly a
 
 The agent now gives explicit recovery feedback: return exactly one JSON object, with no trailing text or additional actions. An opt-in `--log-rejected-responses` flag saves bounded previews to `--log-file` for diagnosis. Parsing remains strict; ambiguous responses execute no tool. Tests cover recovery and preview limits. Live improvement is not yet verified.
 
-The DeepSeek profile now uses native function calls rather than JSON action text. The adapter normalizes calls into `AgentAction`, preserves call IDs, and returns correlated tool observations. Malformed or multiple calls execute nothing. The text parser remains a fallback for other configurations. Native-calling tests pass; a live DeepSeek rerun is still required.
+The DeepSeek profile now uses native function calls rather than JSON action text. The adapter normalizes calls into `AgentAction`, preserves call IDs, and returns correlated tool observations. Malformed calls and unsupported mixed batches execute nothing; batches of up to eight trusted read-only calls now execute sequentially. The text parser remains a fallback for other configurations. Native-calling tests pass; a live DeepSeek rerun is still required.
 
 Recorded 2026-11-24. Evidence: `/tmp/deepseek-discovery-24-report.json` and its corresponding event log.

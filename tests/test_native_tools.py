@@ -94,7 +94,7 @@ def test_malformed_arguments_are_recoverable_and_never_executed(monkeypatch, arg
     assert calls == []
     assert run["trace"][0]["action"] == "invalid_action"
     error = json.loads(payloads[1]["messages"][-1]["content"])["error"]
-    assert "exactly one provided function" in error["recovery"]
+    assert "at most 8 explicitly read-only functions" in error["recovery"]
     assert payloads[1]["messages"][-1]["tool_call_id"] == "call_1"
     assert run["termination_reason"] == "finished"
 

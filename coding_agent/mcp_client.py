@@ -124,7 +124,10 @@ class MCPClient:
             self.close()
             raise
 
-    def tools(self, allowed: set[str]) -> list[FunctionTool]:
+    def tools(self, allowed: set[str], read_only: set[str] | None = None) -> list[FunctionTool]:
+        read_only = set(read_only or ())
+        if read_only - allowed:
+            raise ValueError("Read-only declarations must be a subset of selected tools")
         discovered, cursors = {}, set()
         params = {}
         while True:
@@ -145,7 +148,8 @@ class MCPClient:
             raise MCPError(f"Requested MCP tools not found: {sorted(allowed - discovered.keys())}")
         tools = [FunctionTool(
             "mcp_" + name, discovered[name].get("description", ""), discovered[name]["inputSchema"],
-            lambda args, tool_name=name: self.call_tool(tool_name, args)) for name in sorted(allowed)]
+            lambda args, tool_name=name: self.call_tool(tool_name, args),
+            read_only=name in read_only) for name in sorted(allowed)]
         # Fail at setup rather than advertise a schema we cannot validate.
         ToolRegistry(tools)
         return tools
