@@ -226,6 +226,12 @@ formatter, linter, or coverage threshold.
 
 ## Further documentation
 
+Open [the interactive HTML walkthrough](docs/presentation.html) in a browser to
+explore the component map, expand implementation details, follow demo commands
+(including environment activation), and inspect included versus absent technology.
+It works offline and contains no performance or capability claims.
+
+
 [Configuration](docs/configuration.md) explains profiles, credentials, model
 adapters, and timeouts. [Tools](docs/tools.md) covers native calls, batching, edits,
 and MCP. [Architecture](docs/architecture.md) describes component interactions.
