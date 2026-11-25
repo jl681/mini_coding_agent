@@ -1,620 +1,243 @@
-# Mini Coding Agent (Local Ollama)
+# Mini Coding Agent
 
-A small, inspectable coding agent inspired by mini-swe-agent. This is an educational implementation, not a production sandbox.
+An educational coding agent that inspects Python repositories, edits existing
+files, and runs tests. It supports local Ollama models and OpenAI-compatible
+Chat Completions endpoints, including direct DeepSeek API calls. A separate
+benchmark runner evaluates repairs with independent regression tests.
 
-## Requirements
+Use disposable, trusted workspaces: the current implementation runs repository
+tests on your computer and is **not a sandbox**.
 
-- Python 3.10+
-- Ollama with `qwen3:8b` pulled (`ollama pull qwen3:8b`)
-- pytest for tests
+## Install
 
-## Setup
+Run these commands from the repository root with Python 3.10 or newer:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e '.[test]'
-ollama pull qwen3:4b
 ```
 
-## Run
+On Windows, activate with `.venv\Scripts\activate`. Keep the environment activated
+for the commands below. Model services are only needed for agent/evaluation runs;
+the default test suite runs without model credentials or Ollama.
 
-**Use only disposable, trusted workspaces**. Test execution runs repository code and is not securely sandboxed.
+## Choose a model profile
+
+Two ready-to-use profiles are defined in [profiles.json](profiles.json). A profile
+selects model settings and tools; it is not a separate agent implementation.
+
+| Profile | Model and connection | Action protocol | Prerequisite |
+| --- | --- | --- | --- |
+| `local-qwen` | `qwen3:8b` through local Ollama | JSON action text; thinking disabled | Ollama running and the model installed |
+| `deepseek` | `deepseek-flash` through the direct DeepSeek API | Native function calls | `DEEPSEEK_API_KEY` in `.env` or the shell |
+
+Both profiles set a 16-turn budget and disable MCP search. The local profile
+sets a 1,024-token generation budget; DeepSeek sets 4,096. Use `--max-steps 24`
+when a task needs more investigation and verification. These budgets are
+configuration choices, not guarantees that a task will finish.
+
+### Local Ollama
+
+Install Ollama separately, start its application or run `ollama serve` in another
+terminal, and download the configured model:
 
 ```bash
-cp -R benchmarks/tasks/add_bug /tmp/coding-agent-demo
-mini-coding-agent --workspace /tmp/coding-agent-demo "Fix calculator.add so it adds rather than subtracts. Run tests."
+ollama pull qwen3:8b
 ```
 
-## Tests
+You do not need to run an interactive `ollama run` session before an API call.
+Select this setup with `--profile local-qwen`.
+
+### Direct DeepSeek API
+
+Create `.env` only if you do not already have one:
 
 ```bash
-pytest -q
-RUN_LIVE=1 pytest -q -m live
+test -e .env || cp .env.example .env
 ```
 
-Tests are organized by responsibility: `tests/test_tool_registry.py` covers
-registration and argument validation, `tests/test_workspace.py` covers local
-operations and adapters, and `tests/test_edit_file.py` covers exact-match editing.
-`tests/test_agent.py` exercises scripted agent decisions and recovery;
-`tests/test_integration.py` contains the opt-in live Ollama test.
-`tests/test_mcp.py` tests real MCP subprocess communication without Ollama or network access.
+Edit that file and set your key:
 
-Run one component's tests with `python -m pytest -q tests/test_tool_registry.py`.
+```dotenv
+DEEPSEEK_API_KEY=your-actual-key
+```
 
-## Independent evaluation
+Select it with `--profile deepseek`. This profile calls DeepSeek directly;
+Ollama is not involved. Hosted calls may incur API charges. `.env` is Git-ignored;
+never put the key value into `profiles.json` or a CLI argument.
 
-After installing the project, use the `mini-coding-agent-evaluate` console command
-or the equivalent `python -m benchmarks.evaluate`. Reinstall with
-`pip install -e '.[test]'` after adding or changing console entry points.
+Run profile examples from the repository root. `.env` and `profiles.json` are
+resolved from the current directory, not the target workspace. Use `--env-file`
+and `--profiles-file` to select other locations. No profile is selected implicitly.
+
+## Two commands, two purposes
+
+| Command | Purpose | Workspace behavior | Output |
+| --- | --- | --- | --- |
+| `mini-coding-agent` | Solve your supplied task | Modifies the existing directory passed to `--workspace` | JSON summary and action trace on stdout |
+| `mini-coding-agent-evaluate` | Measure repairs on bundled benchmark tasks | Creates a fresh temporary workspace for every trial | JSON report file and summary on stdout |
+
+Both commands share model profiles and common options. Module equivalents are
+`python -m coding_agent.cli` and `python -m benchmarks.evaluate`. If a console
+command is missing, reactivate the environment and repeat the editable install.
+
+### Run the agent on a disposable example
+
+Create a fresh workspace; use the same terminal for the following commands:
 
 ```bash
-mini-coding-agent-evaluate --model qwen3:8b --task checkout_discovery \
-  --runs 1 --no-think --output /tmp/coding-agent-discovery-no-think.json
+DEMO_DIR=$(mktemp -d)
+cp -R benchmarks/tasks/add_bug/. "$DEMO_DIR/"
+
+mini-coding-agent --profile local-qwen --workspace "$DEMO_DIR" \
+  "Fix calculator.add so it adds its inputs. Run tests."
 ```
+
+For direct API inference, replace `--profile local-qwen` with `--profile deepseek`.
+The agent edits this workspace directly; it does not automatically create a
+branch, commit changes, export a patch, or merge anything.
+
+### Evaluate one task
 
 ```bash
-# Three runs per task: fifteen fresh workspaces in total.
-python -m benchmarks.evaluate --model qwen3:4b --runs 3 --output benchmark-results.json
-
-# Select one task and set explicit execution limits.
-python -m benchmarks.evaluate --model qwen3:4b --task order_total --runs 2 --max-steps 16
+mini-coding-agent-evaluate --profile deepseek \
+  --task checkout_discovery --runs 1 --max-steps 24 \
+  --log-file /tmp/agent-events.jsonl \
+  --output /tmp/agent-report.json
 ```
 
-The suite contains five small repair tasks:
+This runs one trial, records live diagnostic events, then grades the resulting
+source against original visible tests and hidden regressions. Replace the profile
+to evaluate a different model; no `--workspace` argument is needed.
 
-| Task | Behavior being evaluated |
+### Evaluate all tasks repeatedly
+
+```bash
+mini-coding-agent-evaluate --profile deepseek --runs 3 --max-steps 24 \
+  --log-file /tmp/full-events.jsonl --output /tmp/full-report.json
+```
+
+Omitting `--task` selects all five tasks. `--runs 3` means three repetitions per
+task: **15 trials**, each making multiple model requests. Repeat `--task` to
+select a subset. These small fixtures provide a development baseline, not a
+measurement of general coding ability.
+
+### Enable MCP repository search
+
+```bash
+mini-coding-agent-evaluate --profile deepseek \
+  --task checkout_discovery --runs 1 --max-steps 24 --mcp-search \
+  --output /tmp/mcp-report.json
+```
+
+This starts the bundled read-only search server for the trial and exposes
+`mcp_search_repo` to the model. Search is a literal substring match, not semantic
+search. Making the tool available does not force the model to use it. Compare
+runs with and without the flag using the same profile and budgets.
+
+## Understand the result
+
+`success_rate` is the fraction of trials passing independent grading. Also inspect
+`results[].termination_reason`: a patch can pass tests even if the agent exhausted
+its budget without calling `finish`. A fully completed successful trial has
+`passed: true` and `termination_reason: "finished"`.
+
+`steps` counts model-response turns, including rejected responses and `finish`.
+Native models may request up to eight trusted read-only calls in one turn;
+those calls execute sequentially and have separate trace entries. Trace length
+therefore need not equal steps. Benchmark `tool_calls` counts individual calls by
+tool name, while `invalid_actions` and `tool_errors` identify different failures.
+
+```bash
+python -m json.tool /tmp/agent-report.json
+tail -f /tmp/agent-events.jsonl
+```
+
+`--output` defaults to `benchmark-results.json`; it is overwritten on each
+invocation. Logs are optional and append JSON Lines events, flushing each event.
+Use separate filenames for comparisons. `/tmp` is temporary system storage, not
+a project directory. See [evaluation details](docs/evaluation.md) and
+[logging details](docs/observability.md).
+
+## Command reference
+
+Obtain the full parser help without running a model:
+
+```bash
+mini-coding-agent --help
+mini-coding-agent-evaluate --help
+```
+
+| Option | Available on | Meaning |
+| --- | --- | --- |
+| `--workspace PATH` and positional task text | Agent only | Existing repository directory and instruction; both required |
+| `--task NAME` | Evaluator only | Select a bundled task; repeatable; omission selects all |
+| `--runs N` | Evaluator only | Repetitions per selected task; default 3 |
+| `--output PATH` | Evaluator only | Write the complete grading report |
+| `--profile NAME` | Both | Load named model/tool settings; built-ins are `local-qwen` and `deepseek` |
+| `--profiles-file PATH`, `--env-file PATH` | Both | Select nonsecret profiles and environment/credential files |
+| `--max-steps N` | Both | Bound model-response turns; built-in profiles set 16 |
+| `--max-output-tokens N` | Both | Optional provider generation budget; may include reasoning tokens |
+| `--mcp-search`, `--no-mcp-search` | Both | Enable or disable bundled MCP search |
+| `--log-file PATH` | Both | Append durable execution events |
+| `--log-rejected-responses` | Both | Include bounded rejected-response previews; requires `--log-file` |
+| `--model-timeout SECONDS` | Both | Model response read timeout; default 180; not a whole-run deadline |
+| `--mcp-timeout SECONDS` | Both | MCP transport timeout; default 10 |
+| `--test-timeout SECONDS` | Evaluator only | Independent grading timeout; default 30; does not configure the agent's test tool |
+
+Advanced model overrides include `--provider`, `--model`, `--base-url`,
+`--api-key-env`, `--think` / `--no-think`, `--native-tools` / `--no-native-tools`,
+`--json-mode` / `--no-json-mode`, and `--token-limit-field`. Their provider-specific
+restrictions are explained in the [configuration guide](docs/configuration.md).
+For example, Ollama's `--no-think` cannot be used with the DeepSeek adapter.
+
+With a profile, explicit flags override profile settings, which override built-in
+defaults. Profiles replace legacy `MODEL_*` defaults as a unit to avoid mixing
+providers. Credential lookup still uses the environment, with shell values taking
+precedence over `.env`. Without a profile, legacy environment defaults continue
+to work; the built-in fallback is Ollama with `qwen3:8b` and its default thinking
+behavior. Use profiles for reproducible runs.
+
+## Development
+
+```bash
+python -m pytest -q
+python -m pytest -q tests/test_read_batches.py
+RUN_LIVE=1 python -m pytest -q -m live
+```
+
+The first two commands run offline tests, including mocked model APIs and real
+MCP subprocess checks. The last command explicitly enables the live Ollama test;
+it requires the installed model and running server. There is no configured
+formatter, linter, or coverage threshold.
+
+| Location | Responsibility |
 | --- | --- |
-| `add_bug` | Repair arithmetic addition while preserving negative and fractional inputs. |
-| `order_total` | Inspect `orders.py` and `pricing.py` to fix line pricing used by order aggregation. |
-| `average_empty` | Handle empty sequences when the existing visible tests already pass. |
-| `checkout_shipping` | Repair shipping eligibility in the original small checkout fixture. |
-| `checkout_discovery` | Follow nested purchase-flow modules to find a shipping data-flow bug while preserving preview and subscription behavior. |
-
-Each trial uses a fresh workspace and model instance. After the agent stops, the
-evaluator copies its source changes into a separate grading workspace containing
-the original visible tests and hidden regression tests. Changes to visible tests
-are recorded in the diff but do not affect grading. Hidden tests never enter the
-agent workspace. This separation prevents accidental test weakening; it is not a
-security boundary against malicious repository code.
-
-The JSON report includes overall and per-task success rates, per-run traces,
-Python-file diffs, tool call/error counts, invalid action counts, test output,
-termination reasons, and elapsed time including grading. `outcome` distinguishes
-`passed`, `incorrect_repair`, `step_limit`, `model_error`, `execution_error`,
-`evaluation_error`, and `evaluation_timeout`. The independent `passed` field records
-whether grading tests passed, even when the agent exhausted its step budget.
-Model and agent failures count as unsuccessful trials and do not stop later runs.
-`--test-timeout` bounds independent grading, not the total agent run.
-
-### Compare local tools with MCP search
-
-Run the same task, model, repetition count, and step budget in both modes:
-
-```bash
-python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
-  --runs 3 --max-steps 16 --output /tmp/coding-agent-discovery-baseline.json
-
-python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
-  --runs 3 --max-steps 16 --mcp-search --mcp-timeout 10 \
-  --output /tmp/coding-agent-discovery-mcp.json
-```
-
-The instruction describes free shipping after discounts without naming the
-faulty file or requiring search. The agent can discover the issue using either
-local tools or MCP search. The public entry point delegates through
-`storefront/service.py` to `policies/order_quote.py`; related subscription and
-cart-preview flows also calculate shipping. Visible tests already pass;
-independent regressions check discount-driven threshold crossings, the exact
-boundary, helper behavior, and preservation of the other purchase-related flows.
-The original `checkout_shipping` fixture remains available unchanged.
-
-Tool descriptions now explicitly require relative paths and reading code before
-editing. Rerun both modes with the updated prompt; do not attribute differences
-from older reports solely to MCP. The new task increases discovery work but does
-not guarantee search use or a measurable advantage.
-
-With `--mcp-search`, each trial starts its own server against that trial's
-workspace and closes it before independent grading, including on agent failure.
-Setup failures are recorded as `execution_error` and later trials continue.
-Reports record `mcp_search` at both report and trial level, plus `mcp_timeout` in
-the report. Latency includes server setup and cleanup as well as grading.
-
-Compare success rates and per-run latency, then inspect `tool_calls`,
-`tool_errors`, and `trace` to see whether `mcp_search_repo` was used and what it
-returned. Search use itself is not a scoring requirement, and enabling MCP does
-not force the model to use it. A few runs on one task are exploratory evidence,
-not proof of a general improvement.
-
-Repeat `--task` to select multiple tasks. `--runs` means repetitions **per task**.
-These fixtures provide a development baseline, not evidence of general coding
-capability. Deterministic harness tests in `tests/test_benchmarks.py` use scripted
-models to verify scoring, isolation, repetition, and failure reporting without
-Ollama; their scores do not measure a live model's performance.
-
-## Native function calls
-
-The `deepseek` profile now enables `native_tools: true` and disables text JSON
-mode. The adapter sends registered local and MCP tools through the provider's
-`tools` API, together with a `finish` function. It extracts a function name,
-JSON arguments, and call ID into a common `AgentAction` instead of parsing action
-instructions from ordinary answer text.
-
-```bash
-mini-coding-agent-evaluate --profile deepseek --task checkout_discovery --runs 1 \
-  --log-file /tmp/deepseek-native-events.jsonl \
-  --output /tmp/deepseek-native-report.json
-```
-
-`--native-tools` enables this mode for any compatible endpoint that supports
-Chat Completions function calls; `--no-native-tools` restores the JSON-action
-fallback. Ollama retains its JSON-action path and rejects `--native-tools` for
-now. Text JSON mode is suppressed when native calling is enabled.
-
-After each call, the agent returns an assistant message containing the provider's
-call and a `role: tool` result with the matching `tool_call_id`. When required,
-provider `reasoning_content` is preserved only in conversation memory; it is not
-copied into logs or report traces. Ordinary model text is never executed as an
-action in native mode. Completion requires a valid `finish` function call.
-
-The adapter uses `tool_choice: auto`: DeepSeek thinking mode does not support
-forced `required` choices. The prompt allows up to eight trusted read-only
-calls per step, executed sequentially. Mixed or invalid batches execute nothing
-and receive an error result for every call ID, allowing the conversation to
-recover without leaving unanswered calls. Malformed arguments also return a
-correlated error. Missing
-or duplicate call IDs make the response unusable and raise a model error.
-Unknown tools and invalid argument schemas still pass through normal registry
-validation. Truncated responses never execute a tool.
-
-This uses native function calling, not the provider's optional strict-schema
-Beta feature. Function arguments remain untrusted JSON and are validated before
-execution. Native calling improves protocol structure, not repair correctness,
-and may still require retries. See the
-[DeepSeek Tool Calls guide](https://api-docs.deepseek.com/guides/tool_calls/) and
-[Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion/).
-Tests cover mocked provider round trips and a real bundled MCP subprocess; a
-live DeepSeek run is still needed to verify the change on your account.
-
-## Sequential read-only batches
-
-Native responses can contain up to eight calls when every tool is explicitly
-marked read-only by the host. Local `list_files` and `read_file` qualify. The CLI
-and evaluator explicitly trust the bundled `mcp_search_repo` adapter as read-only.
-`write_file`, `edit_file`, `run_tests`, and lifecycle `finish` must each be called
-alone. `run_tests` executes repository code and is not classified as read-only.
-
-Before starting a batch, the agent parses every call and checks the entire batch
-against tool registration, read-only declarations, and argument schemas. An
-unknown tool, invalid argument schema, malformed JSON, non-read-only call, or
-batch larger than eight rejects the whole batch. No requested call executes in
-that case. Individual path checks and filesystem access occur during execution;
-an expected read error returns an error for that call and other reads continue.
-An unexpected tool crash aborts the run, preserving already completed traces.
-
-Accepted calls execute in order without threads or concurrent access. Only after
-all results are available does the agent ask the model again, returning each
-result with its original `tool_call_id`. The model can still choose sequential
-single calls when later reads depend on earlier observations.
-
-`steps` and `--max-steps` count completed model-response turns, including rejected
-responses and `finish`. One turn can therefore contain several tool trace entries
-with the same `step`, distinct `call_id`, and zero-based `batch_index`. Tool-call
-counts remain individual counts; do not interpret trace length as model steps.
-The CLI result includes total `tool_calls`, while benchmark results retain their
-per-tool count mapping. Events include `batch_started`, `batch_completed`, and
-per-call tool events. Rejection events also record requested tool names and IDs
-without requiring raw-response previews.
-
-Custom tools default to non-read-only. Opt in through
-`FunctionTool(..., read_only=True)` only when their implementation warrants it.
-`MCPClient.tools(allowed, read_only={...})` requires an explicit host declaration;
-server `readOnlyHint` annotations alone do not grant batch eligibility. Text-mode
-JSON actions remain single-action responses.
-
-## Action-format recovery
-
-The agent accepts one JSON action object per model response and never executes
-a prefix extracted from an ambiguous reply. Trailing text, concatenated objects,
-duplicate keys, non-finite numbers, and unexpected top-level fields are rejected.
-The observation tells the model that no action executed and requests exactly one
-object with `action` and `args`, without Markdown or trailing explanations.
-Retries consume the normal step budget. This improves recovery guidance but
-cannot guarantee that a provider will follow the format on a live run.
-
-## Durable run logs
-
-Use `--log-file` on either CLI to append JSON Lines events as execution happens:
-
-```bash
-mini-coding-agent --workspace /tmp/coding-agent-demo --model qwen3:8b \
-  --no-think --log-file /tmp/agent-events.jsonl "Find and fix the bug. Run tests."
-
-mini-coding-agent-evaluate --model qwen3:8b --task checkout_discovery \
-  --runs 1 --no-think --mcp-search --log-file /tmp/benchmark-events.jsonl \
-  --output /tmp/benchmark-report.json
-
-tail -f /tmp/benchmark-events.jsonl
-```
-
-Each event is flushed immediately and includes a UTC timestamp, schema version,
-and unique run ID. Events cover run start/termination, model-request
-start/completion/failure, action rejection, and tool start/completion/failure.
-Tool error observations are distinguished from unexpected exceptions. Logs from
-benchmark agents also include task name, trial number, and MCP mode; report
-entries carry the corresponding run ID even on model failures. Server setup
-failures occur before an agent run and have no run ID or agent events. Independent
-grading remains in the benchmark report rather than the agent event stream.
-
-Model completion events retain Ollama's token counts, durations (in nanoseconds),
-and `done_reason` when supplied. Event elapsed times are in seconds. A
-`done_reason` of `length` produces a separate truncation event and rejected action;
-that response never executes a tool. The loop may recover within its remaining
-step budget. Returned action traces remain available alongside the new run ID.
-
-Full prompts, tasks, raw model responses, and internal thinking text are omitted
-by default. To diagnose malformed action text, opt in with
-`--log-rejected-responses --log-file /tmp/agent-debug.jsonl` on either CLI.
-Only rejected response content is previewed (first 1,000 characters, plus up to
-320 characters around a JSON parse error). These previews can contain sensitive
-model-generated text; they are saved only in log events, not returned traces.
-Internal thinking fields from the provider response are not collected.
-A hash of the assembled system prompt identifies prompt changes (including function schemas in native mode), and model name,
-thinking mode, response timeout, and step budget are recorded at run start.
-Tool arguments and observations are logged with bounded strings and collection
-depth/size, so logs may still contain source code or other sensitive tool data.
-Bounds affect saved events only, not execution or the returned trace.
-
-The recorder opens in append mode, requires an existing parent directory, and
-supports one writer per file. File I/O errors propagate rather than silently
-losing events. Flushing preserves completed writes across ordinary process
-failures, but is not an `fsync` guarantee against power loss. Without `--log-file`,
-no persistent events are written. Uncatchable termination can leave a start event
-without its matching completion.
-
-For custom model implementations, `respond(messages)` now returns
-`ModelResponse(content, metadata={})` from `coding_agent.models` (also re-exported by `coding_agent.core`), rather than a plain
-string. Metadata is optional; scripted models can return
-`ModelResponse(json.dumps(action))`. Native adapters can additionally return an
-`AgentAction` plus provider conversation state; their `respond()` method accepts
-the available definitions through an optional `tools` argument.
-
-## Named configuration profiles
-
-Use `profiles.json` for nonsecret model and tool settings, and `.env` for keys.
-The supplied profiles are `local-qwen` (local Ollama with thinking disabled) and
-`deepseek` (direct DeepSeek Chat Completions). Each profile sets provider, model,
-endpoint, generation budget, step budget, and MCP search mode. No profile is
-selected automatically.
-
-For direct DeepSeek calls, copy the key template if you do not already have `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Edit the private file to set `DEEPSEEK_API_KEY`, then run:
-
-```bash
-mini-coding-agent-evaluate --profile deepseek --task add_bug --runs 1 \
-  --output /tmp/deepseek-report.json --log-file /tmp/deepseek-events.jsonl
-
-mini-coding-agent --profile deepseek --workspace /tmp/coding-agent-demo \
-  "Find and fix the bug. Run tests."
-```
-
-Ollama is not used by the `deepseek` profile. Its endpoint, model ID, and
-`max_tokens` field follow the
-[DeepSeek Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion/).
-API access still requires your account credentials; no live paid request is made
-when loading a profile.
-
-Switch profiles or override individual settings without changing code:
-
-```bash
-mini-coding-agent-evaluate --profile local-qwen --task checkout_discovery \
-  --runs 1 --mcp-search --max-output-tokens 2048
-
-mini-coding-agent-evaluate --profile deepseek --task add_bug --runs 1 --no-mcp-search
-```
-
-Example profile structure:
-
-```json
-{
-  "profiles": {
-    "my-local-model": {
-      "provider": "ollama",
-      "model": "gemma3:4b",
-      "max_output_tokens": 1024,
-      "max_steps": 16,
-      "mcp_search": false
-    }
-  }
-}
-```
-
-Pass `--profiles-file /path/to/profiles.json` for another file. The default is
-`profiles.json` in the current directory; it is only read when `--profile` is
-supplied. Missing profiles, unknown fields (including literal API-key fields),
-and invalid types fail at setup. Supported settings are `provider`, `model`,
-`base_url`, `api_key_env`, `model_timeout`, `think`, `max_output_tokens`,
-`json_mode`, `token_limit_field`, `native_tools`, `max_steps`, `mcp_search`, and `mcp_timeout`.
-Provider and model are required. Store the environment variable's name in
-`api_key_env`, never its value. Provider-specific option combinations are checked
-by the model factory. Workspace, task, report destinations, and log destinations
-remain per-invocation arguments rather than profile settings.
-
-With a profile selected, precedence is explicit CLI flags, then profile values,
-then built-in defaults. **Profiles replace MODEL_* defaults as a unit**, so
-switching providers cannot accidentally reuse another provider's endpoint or
-credential-variable selection from `.env`. An incompatible explicit override
-still fails validation. `--no-mcp-search` can disable a profile's search setting.
-
-Reports and agent events record the selected profile name and a SHA-256 hash of
-its resolved settings. The hash identifies the profile before CLI overrides;
-actual model settings and execution budgets are recorded separately. Editing a
-profile changes its hash. The reusable `load_profile(name, path)` function
-returns validated settings without loading keys, modifying the environment, or
-starting an agent, so another application entry point can use the same loader.
-
-## Environment files and legacy defaults
-
-Both CLIs load `.env` from the current directory, not the target workspace.
-`--env-file /path/to/config.env` selects another file. A missing default `.env` is
-ignored; an explicitly requested missing file is an error. Existing shell
-variables take precedence over file values. Keys are read from the selected
-variable when the model adapter is constructed.
-
-Without `--profile`, existing behavior remains: CLI flags override `MODEL_*`
-values from the environment, which override built-in defaults. Supported legacy
-defaults are `MODEL_PROVIDER`, `MODEL_NAME`, `MODEL_BASE_URL`, `MODEL_API_KEY_ENV`,
-`MODEL_TOKEN_LIMIT_FIELD`, `MODEL_MAX_OUTPUT_TOKENS`, and `MODEL_TIMEOUT`. Existing
-`.env` files need not be changed, but named profiles are preferred for reusable
-nonsecret settings. The supplied `.env.example` now contains only a key slot.
-
-The literal loader supports single-line assignments, quotes, comments, optional
-`export`, and empty values. Quote values containing spaces. It does not evaluate
-shell commands, interpolate variables, or support multiline values. Malformed
-files fail without echoing their contents. `.env` is Git-ignored. API keys are
-omitted from benchmark configuration and event metadata. Programmatic model
-factory calls do not automatically load `.env`; callers explicitly choose when
-to load files.
-
-## Model providers
-
-Both CLIs use `create_model()` from `coding_agent/models.py`. The agent loop
-continues to depend only on `Model.respond()` and `ModelResponse`; it does not
-construct providers or translate their HTTP payloads. Existing imports of
-`OllamaModel`, `Model`, and `ModelResponse` from `coding_agent.core` remain valid.
-
-Ollama is the default provider and defaults to `qwen3:8b`. Switch installed models
-by name, without changing agent code; only pass thinking flags to models that
-support them:
-
-```bash
-mini-coding-agent-evaluate --provider ollama --model gemma3:4b \
-  --task add_bug --runs 1 --max-output-tokens 1024
-
-mini-coding-agent-evaluate --provider ollama --model qwen3:8b --no-think \
-  --task checkout_discovery --runs 1 --max-output-tokens 1024
-```
-
-`--base-url` overrides the Ollama server root (default
-`http://127.0.0.1:11434`); the adapter appends `/api/chat`.
-
-For a server implementing the OpenAI Chat Completions HTTP format, select
-`--provider openai-compatible` and supply its model ID and API base URL. The
-adapter appends `/chat/completions` to that base, so include an API prefix such as
-`/v1`, not the complete chat endpoint:
-
-```bash
-mini-coding-agent-evaluate --provider openai-compatible \
-  --base-url http://localhost:1234/v1 --model your-model-id \
-  --task add_bug --runs 1 --max-output-tokens 1024
-```
-
-This command assumes you have already started that server. An explicitly
-selected model is required; an Ollama model ID is not automatically translated
-into a different server's model ID. Hosted Chat Completions endpoints use the
-same adapter with their API base URL. Set credentials through the environment,
-not command-line key values:
-
-```bash
-mini-coding-agent-evaluate --provider openai-compatible \
-  --base-url https://api.openai.com/v1 --model your-model-id \
-  --api-key-env OPENAI_API_KEY --task add_bug --runs 1
-```
-
-The named variable must already contain a key. Without `--api-key-env`, remote
-compatible endpoints use `OPENAI_API_KEY` if set; loopback endpoints receive no
-key implicitly. Explicitly select an environment variable for authenticated local
-servers. Keys are not included in benchmark configuration or event metadata.
-
-The compatible adapter requests JSON-object output by default; use
-`--no-json-mode` if the endpoint does not support it. The agent still requires
-JSON action text. Native API tool calls are available with `--native-tools`. Multimodal messages,
-streaming, Responses API, and native Anthropic/Gemini formats are not implemented. Endpoint
-and model features vary: this is Chat Completions compatibility, not a promise
-that every provider/model accepts identical options. Unsupported `--think` or
-`--no-think` flags fail explicitly for this adapter instead of being ignored.
-
-`--max-output-tokens` must be positive when supplied; omission preserves the
-provider's default. Ollama receives `options.num_predict`; compatible endpoints
-receive `max_completion_tokens`. For endpoints that require the legacy spelling,
-select `--token-limit-field max_tokens` (compatible provider only). Token budgets
-can include reasoning tokens and are not equivalent measures of useful text
-across models. The compatible adapter omits temperature to avoid assuming all
-models support that setting.
-
-Compatible responses normalize `finish_reason` into the `done_reason` metadata
-used by the agent; usage counts retain their provider field names. A length limit
-never executes a partial action. Refusals, filtered responses, malformed responses,
-and native tool-call responses in text mode are reported as model errors. See the
-[Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
-for the underlying response format and token controls.
-
-Reports record provider, model, token budget, JSON mode, and compatible token
-field selection. Event logs record provider and adapter configuration without
-credentials. Compare models under explicitly recorded settings; equal token
-budgets do not guarantee equal reasoning effort. Adapter tests mock HTTP; no
-third-party endpoint or paid API has been called to validate this feature.
-
-## Model thinking mode
-
-For Ollama, both entry points accept `--think` to enable model thinking and `--no-think` to
-disable it. Omitting both leaves the request field unset, preserving Ollama's
-model default. The setting is sent as top-level `think`, not inside `options`;
-support depends on the selected model. Benchmark reports record `think` as
-`true`, `false`, or `null` (model default).
-
-```bash
-mini-coding-agent --workspace /tmp/coding-agent-demo --model qwen3:8b --no-think \
-  "Find and fix the addition bug. Run tests."
-
-python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
-  --runs 1 --max-steps 16 --no-think --model-timeout 180 \
-  --output /tmp/coding-agent-discovery-no-think.json
-```
-
-Use the same thinking setting in both modes when comparing MCP search. Disabling
-thinking does not disable model action selection; it changes model generation
-behavior. `--max-output-tokens` now optionally bounds generation through the selected adapter.
-
-## Troubleshooting local model timeouts
-
-Localhost Ollama requests bypass environment proxies. Connection establishment
-has a five-second timeout; `--model-timeout` controls the response read timeout
-(default 180 seconds) for both the agent CLI and evaluator. It does not change
-MCP or grading timeouts, and is not a total trial deadline.
-
-First try one trial with a longer response allowance:
-
-```bash
-python -m benchmarks.evaluate --model qwen3:8b --task checkout_discovery \
-  --runs 1 --max-steps 16 --model-timeout 600 \
-  --output /tmp/coding-agent-discovery-diagnostic.json
-```
-
-A longer timeout allows slow generation but does not establish its cause. If
-this still times out, inspect Ollama's logs and resource usage, check for concurrent
-generation requests, and compare a simple direct chat request. A successful
-`/api/tags` request establishes availability, not successful model generation.
-Use the same timeout in both modes when resuming the MCP comparison.
-
-## Design
-
-- Ollama `/api/chat` JSON-format response with one action per step.
-- Five tools: `list_files`, `read_file`, `write_file`, `edit_file`, `run_tests`.
-- `finish` action and maximum-step termination.
-- Full action/observation trace in output.
-- Independent hidden tests and repeat-run success rate.
-
-## Localized edits
-
-Prefer `edit_file` for small changes rather than rewriting a whole file:
-
-```json
-{"action":"edit_file","args":{"path":"calculator.py","old_text":"return a - b","new_text":"return a + b"}}
-```
-
-Read the file first. `old_text` must be non-empty and match exactly once,
-including whitespace; overlapping matches are rejected as ambiguous. Reread the
-file after a mismatch or include more context when a match is ambiguous.
-`new_text` may be empty to delete a passage. Only existing workspace `.py` files
-are editable, and both the original and resulting files are limited to 100,000
-UTF-8 bytes. Validation failures leave file bytes unchanged; successful edits
-preserve bytes outside the replaced passage. `write_file` remains available for
-whole-file replacement.
-
-## MCP repository search
-
-Enable the bundled read-only MCP server alongside the existing local tools:
-
-```bash
-mini-coding-agent --workspace /tmp/coding-agent-demo --mcp-search --mcp-timeout 10 \
-  "Find the addition bug, fix it, and run tests."
-```
-
-The model sees `mcp_search_repo` with a string `query` argument. It performs
-literal, case-sensitive searches in Python files and returns relative paths,
-1-based line numbers, and matching text. The server skips symlinks, virtual
-environments, Git metadata, and oversized files. Results are limited to 100
-matches, 500 scanned Python files, and 500 characters per matching line; check
-`truncated` before assuming the results are exhaustive.
-
-`MCPClient` launches a subprocess, initializes MCP, discovers tools with
-`tools/list`, and invokes them with `tools/call`. The connection stays open for
-the agent run and closes even if the model fails. Each transport operation has
-a timeout; a transport failure closes the connection and becomes an error
-observation, while a server-reported tool failure leaves the connection usable.
-There is no automatic reconnect. Startup/discovery failures abort setup.
-
-The implementation uses the standard library and a narrow
-[MCP 2025-11-25 stdio protocol](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-subset, not the official SDK. It supports one synchronous request at a time,
-initialization, ping handling, paginated discovery, and tool calls. It does not
-implement HTTP, resources, prompts, sampling, or richer argument schemas.
-Selected tools must expose the registry's closed string-object schemas; other
-schemas fail at setup. This has been tested against the bundled subprocess
-server and controlled protocol fixtures, not third-party servers.
-
-Programmatic use explicitly selects which discovered tools to expose:
-
-```python
-import sys
-from coding_agent.mcp_client import MCPClient
-
-with MCPClient([sys.executable, "-m", "coding_agent.mcp_search_server",
-                "--workspace", str(workspace.root)]) as client:
-    tools = workspace_tools(workspace).with_tools(client.tools({"search_repo"}))
-    result = CodingAgent(model, tools).run("Find and fix the bug")
-```
-
-Only the bundled server is read-only by construction. Tool descriptions and MCP
-annotations do not enforce permissions on arbitrary servers. A configured server
-runs as a normal subprocess with the current user's permissions; workspace path
-checks do not sandbox it. The CLI only launches the bundled search server.
-
-## Extending tools
-
-`CodingAgent` accepts a `ToolRegistry` instead of a workspace. Existing callers
-should wrap their workspace with `workspace_tools(workspace)`:
-
-```python
-from coding_agent.core import CodingAgent, OllamaModel, Workspace, workspace_tools
-
-agent = CodingAgent(OllamaModel(), workspace_tools(Workspace("/tmp/coding-agent-demo")))
-```
-
-Define a tool through the `Tool` protocol, or wrap a function:
-
-```python
-from coding_agent.tools import FunctionTool, ToolRegistry, string_arguments
-
-tools = ToolRegistry([
-    FunctionTool("echo", "Echo a message.", string_arguments("message"),
-                 lambda args: {"message": args["message"]})
-])
-agent = CodingAgent(OllamaModel(), tools)
-```
-
-Tool definitions generate the model's prompt. The registry validates arguments
-before execution and returns structured errors for unknown tools, invalid
-arguments, and expected execution failures (`ValueError` or `OSError`). Successful
-handlers return JSON-serializable dictionaries. Unexpected implementation errors
-and model transport failures propagate to the caller.
-
-Schemas currently support only closed objects with string properties, including
-optional properties; `string_arguments` makes every named property required.
-Richer schemas are rejected at registration. The MCP adapter currently
-accepts the same restricted schemas. `finish` is reserved for the agent
-lifecycle; results distinguish `finished` from `step_limit`, neither of which
-independently establishes task correctness.
-
-## Security limitations
-
-- `pytest` executes arbitrary code from the repository. A filesystem path check is **not** a sandbox. For untrusted repos, run the entire agent and test runner in an isolated container/VM with restricted network, filesystem, CPU/memory and no secrets.
-- The current implementation only edits existing `.py` files, and blocks paths resolving outside the workspace.
-- It does not enforce subprocess resource limits beyond wall-clock timeout, prevent malicious symlinks from changing between validation and access, or validate the semantic correctness of patches.
-- The five benchmark tasks are intentionally small; broader repositories and task types are needed for credible capability evaluation.
+| `coding_agent/core.py` | Agent loop, local workspace operations, tool construction |
+| `coding_agent/models.py` | Model interface, Ollama/compatible adapters, provider factory |
+| `coding_agent/config.py`, `profiles.json` | Environment loading and named profiles |
+| `coding_agent/tools.py`, `coding_agent/actions.py` | Tool contracts, validation, normalized actions |
+| `coding_agent/mcp_client.py`, `coding_agent/mcp_search_server.py` | MCP transport and bundled search server |
+| `coding_agent/events.py` | JSON Lines event recording |
+| `coding_agent/cli.py` | Agent console entry point |
+| `benchmarks/evaluate.py`, `benchmarks/tasks/` | Evaluation runner and visible/hidden fixtures |
+| `tests/` | Registry, workspace, model, agent, profile, logging, batch, and evaluator tests |
+
+## Further documentation
+
+[Configuration](docs/configuration.md) explains profiles, credentials, model
+adapters, and timeouts. [Tools](docs/tools.md) covers native calls, batching, edits,
+and MCP. [Architecture](docs/architecture.md) describes component interactions.
+[Run logs](docs/observability.md) explains event fields and privacy limits.
+[Evaluation](docs/evaluation.md) describes grading and failure categories.
+
+The [roadmap](docs/roadmap.md) is planned work: execution backend abstraction,
+container isolation, real-repository tasks, and patch export are not implemented.
+Historical investigations are recorded in [issue 001](docs/issue-001-ollama-generation-timeout.md)
+and [issue 002](docs/issue-002-deepseek-action-format.md).
+
+Repository tests execute arbitrary code with the current user's permissions and
+environment. Path checks and temporary workspaces are not isolation. Existing
+Python files can be edited; new-file creation is not supported. See the roadmap
+before considering untrusted repositories or production use.

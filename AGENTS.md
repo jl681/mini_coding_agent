@@ -1,29 +1,27 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Project Structure
 
-`coding_agent/core.py` contains the Ollama client, workspace tools, and bounded agent loop. `coding_agent/cli.py` exposes the `mini-coding-agent` command. Deterministic tests live in `tests/test_unit.py`; live model tests live in `tests/test_integration.py`. `benchmarks/evaluate.py` evaluates repairs using fixtures in `benchmarks/tasks/add_bug/` and hidden regressions in `benchmarks/tasks/add_bug_hidden/`. Evaluation output is stored in `benchmark-results.json`. Packaging and pytest configuration live in `pyproject.toml`.
+`coding_agent/core.py` contains the agent loop, local `Workspace`, and tool construction. `models.py` defines model adapters and the provider factory; `actions.py` holds normalized actions; `tools.py` handles registration and validation. `config.py` loads environment files and profiles, `events.py` records JSONL events, and the MCP modules implement subprocess search. `cli.py` and `benchmarks/evaluate.py` are separate entry points. Tests are grouped by component under `tests/`; visible and hidden benchmark fixtures live under `benchmarks/tasks/`. Read `README.md` for usage and `docs/architecture.md` for boundaries.
 
-## Build, Test, and Development Commands
+## Development Commands
 
-Use Python 3.10 or newer. Create and activate an environment with `python3 -m venv .venv` and `source .venv/bin/activate`, then install with `pip install -e '.[test]'`. Editable installation is the development workflow; no dedicated build script exists.
+Use Python 3.10+. Create an environment with `python3 -m venv .venv`, activate it, and install with `pip install -e '.[test]'`. Run `python -m pytest -q` for offline verification or select a component, for example `python -m pytest -q tests/test_read_batches.py`. `RUN_LIVE=1 python -m pytest -q -m live` explicitly enables the Ollama integration test.
 
-Run `pytest -q` for the default suite. Start Ollama and use `RUN_LIVE=1 pytest -q -m live` for live integration testing. The CLI defaults to `qwen3:4b`; the model class and evaluator default to `qwen3:8b`. Pull the appropriate model with `ollama pull` or select one explicitly.
+`mini-coding-agent --profile local-qwen --workspace /tmp/demo "Fix the bug and run tests"` operates on an existing disposable workspace. `mini-coding-agent-evaluate --profile deepseek --task add_bug --runs 1` creates its own trial workspace. Model-backed commands require the selected service; hosted calls may incur charges.
 
-Run the agent with `mini-coding-agent --workspace /tmp/coding-agent-demo --model qwen3:4b "Fix calculator.add and run tests"` after copying a fixture into that disposable directory. Evaluate repeated repairs with `python -m benchmarks.evaluate --model qwen3:4b --runs 3 --output benchmark-results.json`.
+## Configuration and Style
 
-## Coding Style & Naming Conventions
+Keep repository code, comments, and documentation in English. Use four-space indentation, `snake_case` functions, `PascalCase` classes, and explicit type annotations at interfaces. No formatter or linter is configured. Keep credentials in ignored `.env` files, nonsecret presets in `profiles.json`, and invocation-specific paths in CLI arguments. Preserve provider-independent agent logic and clear validation errors.
 
-Use four-space indentation, `snake_case` functions and variables, `PascalCase` classes, and uppercase constants. Follow surrounding type annotations and keep tool behavior explicit. No formatter or linter is configured.
+## Testing and Execution Contracts
 
-## Testing Guidelines
+Use pytest `test_*.py` files and `test_*` functions, temporary workspaces, scripted models, and mocked HTTP. Keep live tests opt-in. Native read batches require explicit host read-only declarations, whole-batch schema validation, and correlated call IDs; writes, tests, and `finish` remain individual actions. Steps count completed model responses, not tool entries. Never expose hidden regressions to the agent or equate visible-test success with independent correctness.
 
-Use pytest, `test_*.py` files, and `test_*` functions. Prefer `tmp_path` fixtures and scripted model responses for deterministic tests. Cover workspace boundaries, tool restrictions, and termination behavior when modifying them. Mark model-dependent tests with `@pytest.mark.live` and retain the `RUN_LIVE` gate. No coverage threshold is configured. Keep hidden evaluation tests unavailable to the agent until execution finishes.
+## Commits and Review
 
-## Commit & Pull Request Guidelines
+Follow the imperative subjects in Git history, such as `Support sequential batches of trusted read-only tools`. Describe behavior changes and validation in pull requests. Include provider, profile, budgets, and repetitions for benchmark claims. Update documentation when CLI or configuration changes.
 
-This checkout has no Git metadata, so historical commit conventions cannot be verified. Use concise, imperative commit subjects. Pull requests should describe behavior changes, link relevant issues, and report test commands and outcomes. Include model names and run counts for benchmark claims.
+## Current Limits
 
-## Security & Configuration
-
-Use disposable, trusted workspaces. Tests execute repository code; path validation is not a security sandbox. Run untrusted code in external isolation without secrets.
+Workspace path checks are not isolation: tests execute local code with inherited permissions and environment. Use trusted copies. Container backends, new-file creation, and patch export remain planned work in `docs/roadmap.md`.
